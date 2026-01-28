@@ -1,0 +1,175 @@
+//// -- LEVEL 1
+//// -- Tables and columns
+
+Table Player {
+  PlayerID int [pk, increment]
+  FirstName varchar
+  LastName varchar
+  DateOfBirth date
+  Position varchar
+  Height int
+  Weight int
+  Throws varchar(5)
+  Bats varchar(5)
+  PlayerLevel varchar // e.g., MLB, MiLB, College
+}
+
+Table Team {
+  TeamID int [pk, increment]
+  TeamName varchar
+  City varchar
+  LeagueID int
+  MLBAffiliateID int [null]
+}
+
+Table Contract {
+  ContractID int [pk, increment]
+  PlayerID int
+  TeamID int
+  Year int
+  Salary decimal(15, 2)
+  SigningBonus decimal(15, 2)
+  Experience float
+  ContractYears int [null]
+  Options varchar [null]
+}
+
+Table HitterStats {
+  HitterStatsID int [pk, increment]
+  PlayerID int
+  TeamID int
+  Season int
+  GamesPlayed int
+  PlateAppearances int
+  AtBats int
+  Runs int
+  Hits int
+  Doubles int
+  Triples int
+  HomeRuns int
+  RBI int
+  Walks int
+  Strikeouts int
+  StolenBases int
+  CaughtStealing int
+  BattingAverage float
+  OnBasePercentage float
+  SluggingPercentage float
+  OnBasePlusSlugging float
+  IsolatedPower float
+  HardHitPercentage float
+  WinsAboveReplacement float
+  WeightedOnBaseAverage float
+  WeightedRunsCreatedPlus float
+}
+
+Table PitcherStats {
+  PitcherStatsID int [pk, increment]
+  PlayerID int
+  TeamID int
+  Season int
+  Wins int
+  Losses int
+  GamesPitched int
+  GamesStarted int
+  Saves int
+  Holds int
+  InningsPitched float
+  HitsAllowed int
+  RunsAllowed int
+  EarnedRuns int
+  HomeRunsAllowed int
+  WalksAllowed int
+  Strikeouts int
+  EarnedRunAverage float
+  FieldingIndependentPitching float
+  ExpectedERA float
+  WalksAndHitsPerInningPitched float
+  WhiffPercentage float
+}
+
+Table ScoutingReport {
+  ReportID int [pk, increment]
+  PlayerID int
+  ReportDate date
+  Position varchar
+  ContactGrade int
+  PowerGrade int
+  RunningGrade int
+  FieldingGrade int
+  ArmGrade int
+  PitchingVelocity int
+  PitchingAccuracy int
+  SpinRateGrade int
+  BreakingBallGrade int
+  OverallPotential int
+  Summary text
+}
+
+Table League {
+  LeagueID int [pk, increment]
+  LeagueName varchar
+  LeagueLevel varchar
+}
+
+Table Trade {
+  TradeID int [pk, increment]
+  TradeDate date
+}
+
+Table TradeDetails {
+  TradeDetailID int [pk, increment]
+  TradeID int
+  PlayerID int
+  OriginalTeamID int
+  NewTeamID int
+}
+
+Table TeamHistoricalData {
+  RecordID int [pk, increment]
+  TeamID int
+  Year int
+  Wins int
+  Losses int
+  PlayoffAppearance boolean
+  WorldSeriesWin boolean
+  RunsScored int
+  RunsAllowed int
+  RunDifferential int
+  TeamBattingAverage float
+  TeamOnBasePercentage float
+  TeamSluggingPercentage float
+  TeamOnBasePlusSlugging float
+  TeamHomeRuns int
+  TeamHits int
+  TeamRBI int
+  TeamStolenBases int
+  TeamEarnedRunAverage float
+  TeamWHIP float
+  TeamStrikeoutsPitching int
+  TeamWalksAllowed int
+}
+
+//// -- LEVEL 2
+//// -- Relationships
+
+Ref: Team.LeagueID > League.LeagueID
+Ref: Team.MLBAffiliateID > Team.TeamID // Self-referencing for affiliate hierarchy
+
+Ref: Contract.PlayerID > Player.PlayerID
+Ref: Contract.TeamID > Team.TeamID
+
+Ref: HitterStats.PlayerID > Player.PlayerID
+Ref: HitterStats.TeamID > Team.TeamID
+
+Ref: PitcherStats.PlayerID > Player.PlayerID
+Ref: PitcherStats.TeamID > Team.TeamID
+
+Ref: ScoutingReport.PlayerID > Player.PlayerID
+
+Ref: TradeDetails.TradeID > Trade.TradeID
+Ref: TradeDetails.PlayerID > Player.PlayerID
+Ref: TradeDetails.OriginalTeamID > Team.TeamID
+Ref: TradeDetails.NewTeamID > Team.TeamID
+
+Ref: TeamHistoricalData.TeamID > Team.TeamID
