@@ -1,8 +1,9 @@
-streamlit>=1.40
-pandas>=2.0
-mysql-connector-python>=9.0
-openai>=1.50
-python-dotenv>=1.0
-altair>=5.0
-chromadb>=0.5
-requests>=2.31
+# Pinned to versions verified working on Python 3.14 (Feb 2026).
+streamlit==1.62.0
+pandas==3.0.5
+mysql-connector-python==26.7.0
+openai==3.3.1
+python-dotenv==1.2.3
+altair==6.2.2
+chromadb==1.5.9
+requests==2.34.2
