@@ -1,4 +1,3 @@
--- Active: 1761668259379@@db-mysql-itom-do-user-28250611-0.j.db.ondigitalocean.com@25060@group01
 -- DDL Script for MLB Scout and Roster Manager Database
 -- Target Database: MySQL
 
