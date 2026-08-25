@@ -235,6 +235,18 @@ def _normalize_league_level_short(league_level: str | None) -> str | None:
     return league_level
 
 
+def _resolve_org_team_name(row: dict) -> str:
+    """Return the MLB organization a player-season belongs to, at any level.
+
+    Team.MLBAffiliateID (and so ParentMLBTeamName) is only set on minor-league
+    affiliates -- an actual MLB team's own row has no parent, so
+    ParentMLBTeamName comes back empty for MLB-level players. Falling back to
+    the player's own TeamName covers that case, giving every row a non-empty
+    org name usable for "which organization is this player in" filtering.
+    """
+    return row.get("ParentMLBTeamName") or row.get("TeamName") or ""
+
+
 def build_pitcher_season_doc(row: dict) -> str:
     """Turn a pitcher season row into a natural-language document."""
     full_name = f"{row['FirstName']} {row['LastName']}"
@@ -362,8 +374,10 @@ def build_player_profiles(start_season: int = 2021, end_season: int = 2024):
             "team_id": int(row.get("TeamID") or 0),
             "team": row.get("TeamName") or "",
             "league_level": row.get("LeagueLevel") or "",
+            "league_level_short": _normalize_league_level_short(row.get("LeagueLevel")) or "",
             "parent_mlb_team_id": int(row.get("ParentMLBTeamID") or 0),
             "parent_mlb_team_name": row.get("ParentMLBTeamName") or "",
+            "org_team_name": _resolve_org_team_name(row),
         })
 
         if idx % 500 == 0:
@@ -396,11 +410,13 @@ def build_player_profiles(start_season: int = 2021, end_season: int = 2024):
             "team_id": int(row.get("TeamID") or 0),
             "team": row.get("TeamName") or "",
             "league_level": row.get("LeagueLevel") or "",
+            "league_level_short": _normalize_league_level_short(row.get("LeagueLevel")) or "",
             # MLB affiliation in both snake_case and CamelCase for flexibility in filters
             "parent_mlb_team_id": int(row.get("ParentMLBTeamID") or 0),
             "parent_mlb_team_name": row.get("ParentMLBTeamName") or "",
             "ParentMLBTeamID": int(row.get("ParentMLBTeamID") or 0),
             "ParentMLBTeamName": row.get("ParentMLBTeamName") or "",
+            "org_team_name": _resolve_org_team_name(row),
         })
 
         if idx % 500 == 0:

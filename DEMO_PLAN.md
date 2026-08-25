@@ -207,6 +207,57 @@ the cause is almost certainly the embedding model — revisit Step 5.
 **Done when:** the public URL loads and all four modules work for a logged-out visitor in
 a private window.
 
+> **Status: pushed, deploy steps 2–4 are on you.** `.gitignore` un-ignores
+> `mlb_scouting.db`, and commit `ccc5a9b` (pushed to `origin/main`) carries it plus the
+> `.chromadb/` store and all of Steps 2–5's code. GitHub only warned that
+> `chroma.sqlite3` (63.89 MB) is over their *recommended* 50 MB — well under the *hard*
+> 100 MB block, so the push went through clean. `.streamlit/config.toml` theming was
+> skipped (optional, not requested). Remaining, and outside what I can do from here
+> since they need your Streamlit Cloud and OpenAI accounts:
+> 1. share.streamlit.io → connect the GitHub repo → main file `07_mlb_assistant_app.py`.
+> 2. Paste a real `OPENAI_API_KEY` into that app's **Secrets** box.
+> 3. Set a hard spend limit on the OpenAI account *before* sharing the URL anywhere.
+> 4. Confirm the "Done when" bar yourself: load the public URL in a private window and
+>    check all four sidebar modules.
+
+### Post-deploy accuracy pass
+
+Live-testing the deployed app surfaced real correctness bugs (not covered by any step
+above) once the OpenAI key issues were sorted out (a `OPEANAI_API_KEY` typo, then an
+invalid key — both on the Streamlit Secrets side, not the code). Fixed:
+
+- **Small-sample rate-stat leaders.** "Top 5 pitchers by ERA" and "highest batting
+  average" — in SQL Chat's no-key fallback, the LLM's own generated SQL, and the
+  Analytics Dashboard's "Top Players by Metric" charts — had no minimum-sample-size
+  floor, so a reliever with 1 inning pitched (0.00 ERA) or a hitter 1-for-1 (1.000 AVG)
+  looked like a leader. Fixed with `AtBats >= 100` / `InningsPitched >= 20` qualifiers:
+  hardcoded in the SQL Chat fallback and the Dashboard's `qualifying_where_clause()`
+  helper, and as a standing rule in `schema_notes.md` so the LLM applies it to any
+  rate-stat question, not just the two hardcoded examples.
+- **Scouting Assistant retrieval was completely unfiltered.** `retrieve_rag_context()`
+  computed an organization, level, and position from the query/dropdown, then had a
+  `# TEMP: Relax player filters for debugging` comment that discarded all three and
+  queried Chroma with no filter at all — so a "should the Padres call up a AAA
+  shortstop" question could retrieve any player, any org, any position. Root cause:
+  two metadata mismatches that likely caused the original relaxation — `position` is
+  stored full-text ("Shortstop") but hints use short codes ("SS"), and `league_level`
+  is stored verbose ("Major League Baseball") but hints use short codes ("MLB"). Also
+  found `parent_mlb_team_name` is empty for MLB-level players themselves (only set on
+  minor-league affiliates), so org filtering would have silently excluded a team's own
+  MLB roster. Fixed: `rag_build_player_profiles.py` now stores `org_team_name`
+  (parent org, falling back to the player's own team when there is no parent) and
+  `league_level_short` (via the already-existing but previously-unused
+  `_normalize_league_level_short`); `retrieve_rag_context()` converts position hints
+  to full names via the existing `POSITION_CODE_TO_FULL` map and filters on all three
+  via a real Chroma `where` clause, cascading to looser filters (drop position, then
+  level, keeping org longest) rather than returning nothing for a narrow combination.
+  This also made the parallel `get_affiliate_map()`/`affiliate_team_ids_by_level`
+  machinery fully redundant, so it was removed rather than left as dead code.
+  Verified: a "Padres, call up a AAA shortstop" query now retrieves only Padres-org
+  shortstops at AAA/AA, not a random unfiltered mix.
+- Rebuilt `player_season_profiles` for the new metadata (still 5,768 docs, still
+  2024-only). `.chromadb/` grew from 73MB to 88MB — still under GitHub's 100MB limit.
+
 ---
 
 ## Step 7 — Wire it up

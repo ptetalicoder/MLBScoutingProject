@@ -114,3 +114,13 @@ in JOIN conditions and WHERE filters for each table.
 - Use `PlayerID`, `TeamID`, `LeagueID`, `TradeID` as numeric join keys.
 - When filtering on text categories (e.g., `LeagueLevel`, `PlayerLevel`, `Position`),
   prefer the examples seen in schema/example rows instead of inventing short codes.
+- When ranking or sorting by a *rate* stat (e.g. `BattingAverage`, `OnBasePercentage`,
+  `SluggingPercentage`, `OnBasePlusSlugging`, `WeightedOnBaseAverage`,
+  `EarnedRunAverage`, `FieldingIndependentPitching`, `WalksAndHitsPerInningPitched`),
+  always add a minimum-sample-size qualifier so a one-game or tiny-sample outlier
+  doesn't dominate the results: `HitterStats.AtBats >= 100` for hitting rate stats, or
+  `PitcherStats.InningsPitched >= 20` for pitching rate stats. Skip this qualifier only
+  if the request is about one specific named player, or explicitly asks to include
+  small-sample/September call-up performances.
+- Counting stats (`HomeRuns`, `RBI`, `Hits`, `Wins`, `Saves`, `Strikeouts`, etc.) do not
+  need a sample-size qualifier.

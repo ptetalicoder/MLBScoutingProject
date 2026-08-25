@@ -81,6 +81,32 @@ POSITION_CODE_TO_FULL = {
 }
 
 
+# --- Rate-stat qualifying thresholds ---
+# Sorting/ranking by a rate stat with no minimum sample size lets a single
+# at-bat (1.000 AVG) or a single scoreless inning (0.00 ERA) look like a
+# leader. These mirror the same rule given to the SQL Chat LLM in
+# schema_notes.md, applied here to the dashboard's own hardcoded queries.
+RATE_STAT_COLUMNS = {
+    "BattingAverage",
+    "OnBasePercentage",
+    "SluggingPercentage",
+    "EarnedRunAverage",
+    "FieldingIndependentPitching",
+}
+MIN_AT_BATS_FOR_RATE_STATS = 100
+MIN_INNINGS_PITCHED_FOR_RATE_STATS = 20
+
+
+def qualifying_where_clause(metric_columns, stats_alias, player_type):
+    """Return an extra WHERE clause guarding against tiny-sample rate-stat
+    outliers, if any of `metric_columns` is a rate stat -- else None."""
+    if not any(col in RATE_STAT_COLUMNS for col in metric_columns):
+        return None
+    if player_type == "Hitter":
+        return f"{stats_alias}.AtBats >= {MIN_AT_BATS_FOR_RATE_STATS}"
+    return f"{stats_alias}.InningsPitched >= {MIN_INNINGS_PITCHED_FOR_RATE_STATS}"
+
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="MLB Scouting & Roster Assistant",
@@ -436,9 +462,9 @@ def generate_sql_from_prompt(prompt, schema):
     if client is None:
         st.warning("OPENAI_API_KEY not set. Using placeholder SQL instead of LLM.")
         if "top 5 pitchers by era" in prompt.lower():
-            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
+            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID WHERE ps.InningsPitched >= 20 ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
         elif "highest batting average" in prompt.lower():
-            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, hs.Season, hs.BattingAverage FROM HitterStats hs JOIN Player p ON hs.PlayerID = p.PlayerID ORDER BY hs.BattingAverage DESC LIMIT 10;"
+            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, hs.Season, hs.BattingAverage FROM HitterStats hs JOIN Player p ON hs.PlayerID = p.PlayerID WHERE hs.AtBats >= 100 ORDER BY hs.BattingAverage DESC LIMIT 10;"
         else:
             return "SELECT PlayerID, FirstName, LastName, Position, PlayerLevel FROM Player LIMIT 10;"
 
@@ -448,7 +474,7 @@ def generate_sql_from_prompt(prompt, schema):
             "session to keep hosting costs bounded. Showing an example query instead — "
             "refresh the page to reset your limit."
         )
-        return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
+        return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID WHERE ps.InningsPitched >= 20 ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
 
     try:
         # Load any hand-written domain notes (e.g., valid LeagueLevel values).
@@ -537,62 +563,6 @@ def run_sql_query(conn, sql_query):
     except Exception as e:
         st.error(f"Error executing query: {e}")
         return pd.DataFrame()
-
-
-@st.cache_resource
-def get_affiliate_map(_conn):
-    """Return a mapping from MLB parent team name to its affiliates.
-
-    Structure:
-        {
-            "Arizona Diamondbacks": [
-                {"team_id": 1, "team_name": "Reno Aces", "league_level": "AAA"},
-                ...
-            ],
-            ...
-        }
-    """
-    # We intentionally ignore the specific connection object for caching
-    # purposes; this map only depends on the underlying database contents.
-    conn = _conn
-    if conn is None:
-        return {}
-
-    try:
-        cursor = conn.cursor()
-        cursor.row_factory = dict_row_factory
-        cursor.execute(
-            """
-            SELECT
-                parent.TeamName AS ParentMLBTeamName,
-                child.TeamID   AS AffiliateTeamID,
-                child.TeamName AS AffiliateTeamName,
-                l.LeagueLevel  AS AffiliateLeagueLevel
-            FROM Team child
-            JOIN Team parent ON child.MLBAffiliateID = parent.TeamID
-            JOIN League l ON child.LeagueID = l.LeagueID;
-            """
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-    except sqlite3.Error:
-        return {}
-
-    aff_map: dict[str, list[dict]] = {}
-    for row in rows:
-        parent_name = row.get("ParentMLBTeamName") or ""
-        if not parent_name:
-            continue
-        entry = {
-            "team_id": int(row.get("AffiliateTeamID") or 0),
-            "team_name": row.get("AffiliateTeamName") or "",
-            "league_level": row.get("AffiliateLeagueLevel") or "",
-        }
-        if entry["team_id"] == 0:
-            continue
-        aff_map.setdefault(parent_name, []).append(entry)
-
-    return aff_map
 
 
 # --- Chroma / RAG Setup ---
@@ -880,6 +850,77 @@ def _parse_positions_from_hints(hint_str: str):
     return positions
 
 
+def _parse_levels_from_hints(hint_str: str):
+    """Extract level codes (MLB, AAA, AA, ...) from a `levels=` segment in the hints string."""
+    if not hint_str:
+        return []
+    levels = []
+    raw = hint_str.replace("[HINTS]", "").strip()
+    for segment in raw.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        lower = segment.lower()
+        if lower.startswith("levels="):
+            vals = segment.split("=", 1)[1].strip()
+            for v in vals.split(","):
+                v = v.strip()
+                if v:
+                    levels.append(v)
+    return levels
+
+
+def _chroma_where(conditions: list[dict | None]) -> dict | None:
+    """Combine field conditions into a single Chroma `where` filter, or None."""
+    conditions = [c for c in conditions if c]
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def _query_players_with_fallback(player_col, query_text, n_players, org_team_name, level_codes, position_full_names):
+    """Query player docs, progressively relaxing metadata filters until something matches.
+
+    A fully-specified filter (org + level + position) can easily match zero
+    documents for a narrow roster slice -- e.g. "Yankees AAA catchers" may be
+    0-2 real players in a single-season store. Rather than silently
+    returning nothing, relax the least important constraint first
+    (position, then level) and hold onto the org filter the longest, since
+    "which organization" is usually the most important thing to get right
+    for grounding a call-up/trade answer.
+    """
+    org_cond = {"org_team_name": {"$eq": org_team_name}} if org_team_name else None
+    level_cond = {"league_level_short": {"$in": level_codes}} if level_codes else None
+    position_cond = {"position": {"$in": position_full_names}} if position_full_names else None
+
+    attempts = [
+        _chroma_where([org_cond, level_cond, position_cond]),
+        _chroma_where([org_cond, level_cond]),
+        _chroma_where([org_cond]),
+        None,
+    ]
+    tried = set()
+    for where in attempts:
+        key = str(where)
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            res = (
+                player_col.query(query_texts=[query_text], n_results=n_players, where=where)
+                if where
+                else player_col.query(query_texts=[query_text], n_results=n_players)
+            )
+        except Exception as e:
+            st.warning(f"Player RAG retrieval error: {e}")
+            continue
+        if res.get("ids", [[]])[0]:
+            return res
+    return {"ids": [[]], "documents": [[]], "metadatas": [[]]}
+
+
 def retrieve_rag_context(
     player_col,
     team_col,
@@ -887,18 +928,17 @@ def retrieve_rag_context(
     n_players=8,
     n_teams=5,
     org_team_name_override: str | None = None,
-    affiliate_team_ids_by_level: dict[str, list[int]] | None = None,
 ):
     """Retrieve top player and team docs from Chroma for a given query.
 
-    Uses the enricher hints both for text steering and, when possible,
-    for metadata filters (e.g., limiting to a single MLB organization
-    for call-up questions and focusing on specific positions/levels).
+    Uses the enricher hints both for text steering and for metadata filters
+    (limiting to a single MLB organization, level, and/or position when the
+    query or the org dropdown implies one) via
+    ``_query_players_with_fallback``, which relaxes those filters rather
+    than returning nothing when a narrow combination has no matches.
 
-    If ``org_team_name_override`` is provided (from the dropdown), it
-    takes precedence over any team parsed from the hints. When
-    ``affiliate_team_ids_by_level`` is supplied, call-up retrieval can
-    fall back to querying by those affiliate TeamIDs (e.g., AAA/AA).
+    If ``org_team_name_override`` is provided (from the dropdown), it takes
+    precedence over any team parsed from the hints.
     """
     player_docs = []
     team_docs = []
@@ -910,31 +950,23 @@ def retrieve_rag_context(
     else:
         query_text = user_query
 
-    # Parse org + intent + positions from hints (can be overridden)
-    org_team_name_hints, intents = _parse_team_and_intent_from_hints(hint_str) if hint_str else (None, [])
+    # Parse org + positions + levels from hints (org can be overridden)
+    org_team_name_hints, _intents = _parse_team_and_intent_from_hints(hint_str) if hint_str else (None, [])
     org_team_name = org_team_name_override or org_team_name_hints
     position_codes = _parse_positions_from_hints(hint_str)
+    level_codes = _parse_levels_from_hints(hint_str)
+    position_full_names = [POSITION_CODE_TO_FULL.get(code, code) for code in position_codes]
 
-    has_callup = "CALL_UP_DECISION" in intents
-    has_trade = "TRADE_EVALUATION" in intents
+    res = _query_players_with_fallback(
+        player_col, query_text, n_players, org_team_name, level_codes, position_full_names
+    )
+    for i in range(len(res.get("ids", [[]])[0])):
+        player_docs.append({
+            "id": res["ids"][0][i],
+            "doc": res["documents"][0][i],
+            "meta": res["metadatas"][0][i],
+        })
 
-    # TEMP: Relax player filters for debugging – query broadly from Chroma
-    player_results = []
-    try:
-        # Ignore org, level, and position filters for now; just see if
-        # any player documents are present and retrievable.
-        res = player_col.query(query_texts=[query_text], n_results=n_players)
-        for i in range(len(res.get("ids", [[]])[0])):
-            player_results.append({
-                "id": res["ids"][0][i],
-                "doc": res["documents"][0][i],
-                "meta": res["metadatas"][0][i],
-            })
-    except Exception as e:
-        st.warning(f"Player RAG retrieval error: {e}")
-
-    # Truncate to requested number of player docs
-    player_docs = player_results[:n_players]
     # Team docs: still a single pass, unfiltered
     try:
         team_res = team_col.query(
@@ -1338,6 +1370,10 @@ elif app_section == "Analytics Dashboard":
         where_clauses = [f"{stats_alias}.Season = ?"]
         params = [season]
 
+        qualifier = qualifying_where_clause([metric_column], stats_alias, player_type)
+        if qualifier:
+            where_clauses.append(qualifier)
+
         # Level filter (via League.LeagueLevel) - allow multiple
         if selected_levels:
             placeholders = ",".join(["?"] * len(selected_levels))
@@ -1471,6 +1507,10 @@ elif app_section == "Analytics Dashboard":
         # Build WHERE clauses again (top filters apply here too) for season
         scatter_where_clauses = [f"{stats_alias}.Season = ?"]
         scatter_params = [season]
+
+        scatter_qualifier = qualifying_where_clause([scatter_x_col, scatter_y_col], stats_alias, player_type)
+        if scatter_qualifier:
+            scatter_where_clauses.append(scatter_qualifier)
 
         if selected_levels:
             placeholders = ",".join(["?"] * len(selected_levels))
@@ -1614,6 +1654,10 @@ elif app_section == "Analytics Dashboard":
         # Build filters used to choose top-N players in 2024
         top_where_clauses = [f"{stats_alias}.Season = ?"]
         top_params = [2024]
+
+        line_qualifier = qualifying_where_clause([line_metric_col], stats_alias, player_type)
+        if line_qualifier:
+            top_where_clauses.append(line_qualifier)
 
         if selected_levels:
             placeholders = ",".join(["?"] * len(selected_levels))
@@ -1935,21 +1979,6 @@ elif app_section == "Scouting Assistant (LLM)":
         help="Choose your MLB organization, or leave as '(Not specified)' if you prefer to state it in the question.",
     )
 
-    # Load affiliate map once and derive any affiliate info for the
-    # selected organization so both RAG and the LLM can use the real
-    # system structure (AAA, AA, etc.).
-    affiliate_map = get_affiliate_map(conn)
-    affiliate_info = affiliate_map.get(selected_team, []) if selected_team and selected_team != "(Not specified)" else []
-
-    # Build a simple level->TeamID mapping for call-up targeting.
-    affiliate_team_ids_by_level: dict[str, list[int]] = {}
-    for aff in affiliate_info:
-        lvl = (aff.get("league_level") or "").upper()
-        tid = aff.get("team_id")
-        if not tid:
-            continue
-        affiliate_team_ids_by_level.setdefault(lvl, []).append(int(tid))
-
     user_query = st.text_area(
         "Describe your scenario or question (e.g., call-up decision, trade idea, roster concern):",
         height=160,
@@ -1988,7 +2017,6 @@ elif app_section == "Scouting Assistant (LLM)":
                         n_players=n_players,
                         n_teams=n_teams,
                         org_team_name_override=selected_team if selected_team != "(Not specified)" else None,
-                        affiliate_team_ids_by_level=affiliate_team_ids_by_level if affiliate_team_ids_by_level else None,
                     )
                     rag_context = format_rag_context_for_llm(player_docs, team_docs)
                     st.session_state["rag_context"] = rag_context
