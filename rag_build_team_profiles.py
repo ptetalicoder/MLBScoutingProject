@@ -1,37 +1,12 @@
-import os
 from decimal import Decimal
-
-import mysql.connector
-from dotenv import load_dotenv
 
 import chromadb
 from chromadb.utils import embedding_functions
 
-
-# Load environment variables
-load_dotenv()
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "user": os.getenv("DB_USER"),
-    "port": int(os.getenv("DB_PORT", "25060")),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-}
+from db import create_db_connection, dict_row_factory
 
 
 SEASONS = [2021, 2022, 2023, 2024]
-
-
-def create_db_connection():
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
 
 
 def _to_float(value):
@@ -87,11 +62,12 @@ def fetch_team_seasons(conn):
         JOIN Team t ON thd.TeamID = t.TeamID
         LEFT JOIN League l ON t.LeagueID = l.LeagueID
         LEFT JOIN Team parent ON t.MLBAffiliateID = parent.TeamID
-        WHERE thd.Year IN (%s, %s, %s, %s)
+        WHERE thd.Year IN (?, ?, ?, ?)
         ORDER BY thd.Year, t.TeamID
     """
 
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
+    cursor.row_factory = dict_row_factory
     cursor.execute(sql, tuple(SEASONS))
     rows = cursor.fetchall()
     cursor.close()
@@ -217,13 +193,10 @@ def build_team_profiles():
         print("No data found; exiting.")
         return
 
-    # Set up persistent Chroma client
+    # Set up persistent Chroma client + local ONNX embedding function (free, offline)
     client = chromadb.PersistentClient(path=".chromadb")
 
-    embedding_function = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_name="text-embedding-3-small",
-    )
+    embedding_function = embedding_functions.DefaultEmbeddingFunction()
 
     collection = client.get_or_create_collection(
         name="team_season_profiles",

@@ -1,30 +1,9 @@
-import os
 from datetime import datetime
 
-import mysql.connector
-from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
 
-
-load_dotenv()
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "user": os.getenv("DB_USER"),
-    "port": int(os.getenv("DB_PORT", "25060")),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-}
-
-
-def create_db_connection():
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        return conn
-    except Exception as e:
-        print(f"Error connecting to DB: {e}")
-        return None
+from db import create_db_connection, dict_row_factory
 
 
 # ---------- FETCH DATA ----------
@@ -84,10 +63,11 @@ def fetch_hitter_seasons(conn, start_season=2021, end_season=2024):
         LEFT JOIN Team parent ON t.MLBAffiliateID = parent.TeamID
         LEFT JOIN Contract c
             ON c.PlayerID = hs.PlayerID AND c.Year = hs.Season
-        WHERE hs.Season BETWEEN %s AND %s
+        WHERE hs.Season BETWEEN ? AND ?
         ORDER BY hs.PlayerID, hs.Season;
     """
-    cur = conn.cursor(dictionary=True)
+    cur = conn.cursor()
+    cur.row_factory = dict_row_factory
     cur.execute(sql, (start_season, end_season))
     rows = cur.fetchall()
     cur.close()
@@ -144,10 +124,11 @@ def fetch_pitcher_seasons(conn, start_season=2021, end_season=2024):
         LEFT JOIN Team parent ON t.MLBAffiliateID = parent.TeamID
         LEFT JOIN Contract c
             ON c.PlayerID = ps.PlayerID AND c.Year = ps.Season
-        WHERE ps.Season BETWEEN %s AND %s
+        WHERE ps.Season BETWEEN ? AND ?
         ORDER BY ps.PlayerID, ps.Season;
     """
-    cur = conn.cursor(dictionary=True)
+    cur = conn.cursor()
+    cur.row_factory = dict_row_factory
     cur.execute(sql, (start_season, end_season))
     rows = cur.fetchall()
     cur.close()
@@ -338,16 +319,13 @@ def build_player_profiles(start_season: int = 2021, end_season: int = 2024):
 
     conn.close()
 
-    # Setup Chroma persistent client + embedding function
+    # Setup Chroma persistent client + local ONNX embedding function (free, offline)
     client = chromadb.PersistentClient(path=".chromadb")
-    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_name="text-embedding-3-small",
-    )
+    embedding_function = embedding_functions.DefaultEmbeddingFunction()
 
     collection = client.get_or_create_collection(
         name="player_season_profiles",
-        embedding_function=openai_ef,
+        embedding_function=embedding_function,
     )
 
     ids = []
@@ -445,5 +423,10 @@ def build_player_profiles(start_season: int = 2021, end_season: int = 2024):
 
 
 if __name__ == "__main__":
-    # You can tweak the range here if needed
-    build_player_profiles(2021, 2024)
+    # Public demo ships only the most recent season: embedding all four
+    # seasons (2021-2024) produced a 244MB chroma.sqlite3, which exceeds
+    # GitHub's 100MB per-file push limit. SQL Chat and the Analytics
+    # Dashboard still query the full 2021-2024 range directly against
+    # mlb_scouting.db -- only Scouting Assistant RAG retrieval is limited
+    # to 2024. Widen this range for local/non-public use if needed.
+    build_player_profiles(2024, 2024)

@@ -4,8 +4,11 @@
 !.env.example
 .streamlit/secrets.toml
 
-# Local SQLite database (rebuilt by init_sqlite_db.py + data_import_*.py)
+# Local SQLite database (rebuilt by init_sqlite_db.py + data_import_*.py).
+# mlb_scouting.db itself is committed deliberately -- the public demo needs
+# the built database in the repo since there's no hosted DB server anymore.
 *.db
+!mlb_scouting.db
 *.db-journal
 
 # Virtual environments
@@ -20,9 +23,10 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Chroma vector store (rebuilt by rag_build_*.py).
-# If the demo ships a prebuilt store, un-ignore it deliberately.
-.chromadb/
+# Chroma vector store (rebuilt by rag_build_player_profiles.py /
+# rag_build_team_profiles.py) is deliberately NOT ignored -- it's committed
+# for the public demo, which ships a prebuilt store using local ONNX
+# embeddings so no OpenAI call or rebuild step is needed at deploy time.
 
 # OS / editor
 .DS_Store

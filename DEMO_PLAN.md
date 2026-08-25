@@ -19,17 +19,16 @@ between them.
       `mlb_scouting.db` built: 5,765 players across 5 levels, 10,005 hitter-season rows,
       12,043 pitcher-season rows, 5,765 scouting reports, 733 contracts, 150 teams,
       120 team-season records, seasons 2021–2024.
-- [ ] **Step 2** — Finish the SQLite migration (app, CRUD, RAG builders)
-- [ ] **Step 3** — Get the app running locally end to end
-- [ ] **Step 4** — Demo safety (read-only SQL, per-session CRUD, rate limits)
-- [ ] **Step 5** — Local embeddings for RAG
+- [x] **Step 2** — Finish the SQLite migration (app, CRUD, RAG builders)
+- [x] **Step 3** — Get the app running locally end to end
+- [x] **Step 4** — Demo safety (read-only SQL, per-session CRUD, rate limits)
+- [x] **Step 5** — Local embeddings for RAG
 - [ ] **Step 6** — Deploy to Streamlit Community Cloud
 - [ ] **Step 7** — Screenshots, README, portfolio link
 
-> **Before anything else:** Step 1's work is currently uncommitted. Commit it.
-> Note that `Trade` and `TradeDetails` are empty — no trade data was ever imported. Either
-> leave them out of the demo's scope or note it in `schema_notes.md` so the SQL generator
-> does not write queries against empty tables.
+> **Already handled:** Step 1's work is committed (`5708618 Add SQLite adapter and
+> migrate ETL pipeline off MySQL`). `Trade` and `TradeDetails` are empty — no trade
+> data was ever imported — and that's already noted in `schema_notes.md`.
 
 ---
 
@@ -44,6 +43,12 @@ Three files still talk to MySQL.
 - Replace every `mysql.connector.Error` with `sqlite3.Error` (appears at roughly lines
   146, 164, 185, 237, 289, 311, and further down).
 - Convert every `%s` query placeholder to `?`.
+- **Remove `mysql.connector`-only API calls that don't exist on `sqlite3` objects.**
+  `conn.is_connected()` and `cursor(dictionary=True)` both appear in this file and
+  will raise at runtime even after the connection swap. Drop `is_connected()` checks
+  (a `sqlite3.Connection` is either open or the call already failed) and drop the
+  `dictionary=True` kwarg — `db.py`'s `create_db_connection()` already sets
+  `row_factory = sqlite3.Row`, so rows support dict-style `row["col"]` access without it.
 - **`get_db_schema(conn)` needs rewriting.** It currently introspects MySQL. For SQLite,
   read `sqlite_master` for table names and `PRAGMA table_info(<table>)` for columns.
 - **The SQL-generation prompt tells the model it is writing MySQL.** Change it to SQLite,
@@ -54,7 +59,16 @@ Three files still talk to MySQL.
 **`rag_build_player_profiles.py`** and **`rag_build_team_profiles.py`** — same connection
 swap. Leave their embedding function alone for now; Step 5 handles that.
 
-**Done when:** `grep -rn "mysql" *.py` returns nothing.
+**Done when:** `grep -rn "mysql" *.py` returns nothing, and
+`grep -rn "is_connected(\|dictionary=True" *.py` also returns nothing.
+
+> **Also found and fixed while migrating:** `CONCAT(FirstName, ' ', LastName)` isn't
+> valid SQLite (switched to `||`), and ~130 call sites do `row.get(...)` on query
+> results — inherited from mysql.connector's `dictionary=True` dict rows — which
+> breaks against plain `sqlite3.Row` (no `.get()`). Added `dict_row_factory` to
+> `db.py`: the connection keeps `sqlite3.Row` as its default (positional-tuple code in
+> the Analytics Dashboard depends on it), and any cursor that needs `.get()` sets
+> `cursor.row_factory = dict_row_factory` individually.
 
 ---
 
@@ -71,6 +85,25 @@ version ahead of what this code was written against. pandas 3 changed copy-on-wr
 semantics; altair 6 adjusted chart APIs. The Analytics Dashboard is the likely casualty.
 Fix forward — do not downgrade, since the pinned versions are what Streamlit Cloud will
 install.
+
+> **What actually broke (pandas 3/altair 6 turned out fine):** three unrelated bugs,
+> all fixed:
+> 1. `sqlite3.connect()` defaults to `check_same_thread=True`, but Streamlit runs each
+>    rerun on a fresh thread while `@st.cache_resource` keeps the same connection alive
+>    across reruns — every interaction after the first crashed with "SQLite objects
+>    created in a thread can only be used in that same thread." Fixed by passing
+>    `check_same_thread=False` in `db.py` (safe here: one query at a time, no real
+>    concurrent access).
+> 2. `client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))` at module level now raises
+>    immediately when the key is missing (no local `.env` exists yet), instead of
+>    failing lazily on first call like the code assumed — this crashed the app on
+>    every section, not just the ones that call OpenAI. Fixed by only constructing the
+>    client when a key is present and checking `client is None` at the two call sites.
+> 3. The no-key SQL Chat fallback and the scatter-plot's "no top players" branch both
+>    had pre-existing bugs (a `Player.FullName`/`TeamID` column that never existed, and
+>    an `if df_scatter.empty:` block dedented outside the `else:` that defines
+>    `df_scatter`, so it read the variable unset when the query returned zero rows).
+>    Fixed both.
 
 The Scouting Assistant will fail until Step 5 builds the Chroma collections. That is
 expected; skip it for now.
@@ -100,6 +133,24 @@ demo limit rather than an error.
 
 **Done when:** a hostile visitor cannot damage the data or run up the bill.
 
+> **Implemented:** `db.py` gained `create_readonly_connection()` (SQLite URI
+> `?mode=ro`, confirmed writes raise `OperationalError: attempt to write a readonly
+> database`) for SQL Chat + Analytics Dashboard, and `create_sandbox_connection()`
+> (copies `mlb_scouting.db` to a temp file) for CRUD, cached per-session on
+> `st.session_state["crud_conn"]` — confirmed a write through the sandbox does not
+> appear in the real database. `run_sql_query()` now rejects anything that isn't a
+> single `SELECT` via `is_safe_select_query()` (regex-based: single statement, starts
+> with `SELECT`, no `INSERT`/`DROP`/`ATTACH`/`PRAGMA`/etc. anywhere) before it ever
+> reaches the connection — defense in depth alongside the read-only connection.
+> Both `generate_sql_from_prompt()` and `call_scouting_llm()` now cap paid OpenAI
+> calls at 8 per browser session (`st.session_state["llm_calls_used"]`); once tripped,
+> SQL Chat falls back to an example query and the Scouting Assistant returns a
+> labeled example answer, both with a note instead of an error. The API key now reads
+> from `st.secrets` first (for Streamlit Cloud) and falls back to `os.getenv` (for
+> local `.env` runs) — `st.secrets.get(...)` was confirmed to raise
+> `StreamlitSecretNotFoundError` when no `secrets.toml` exists at all, so that read is
+> wrapped in a try/except.
+
 ---
 
 ## Step 5 — Local embeddings
@@ -120,6 +171,20 @@ question.
 
 **Done when:** the Scouting Assistant answers with no OpenAI key set for embeddings, and
 `player_season_profiles` / `team_season_profiles` both rebuild cleanly.
+
+> **Implemented, with a scope change from the size check:** embedding all four seasons
+> (2021–2024) produced a 244MB `chroma.sqlite3` — over GitHub's 100MB hard per-file push
+> limit, not just "large." Discussed with the user; chose to scope
+> `player_season_profiles` down to 2024 only (`rag_build_player_profiles.py`'s `__main__`
+> now calls `build_player_profiles(2024, 2024)` — 5,768 docs instead of 22,051).
+> `team_season_profiles` stays the full 2021–2024 range (120 docs, never the size
+> problem). Final `.chromadb/` is 73MB. **Trade-off to know about:** the Scouting
+> Assistant's RAG retrieval only has 2024 player-season context now — SQL Chat and the
+> Analytics Dashboard are unaffected since they query `mlb_scouting.db` directly across
+> the full 2021–2024 range. Verified end-to-end: `retrieve_rag_context()` returns real
+> player + team context (22.6k chars) with zero OpenAI calls and no key set; the
+> Scouting Assistant's final answer step correctly still asks for a key (by design —
+> the one paid call per question is generation, not retrieval).
 
 ---
 

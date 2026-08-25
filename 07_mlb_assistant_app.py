@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import mysql.connector
+import re
+import sqlite3
 from openai import OpenAI
 from dotenv import load_dotenv
 import altair as alt
@@ -8,6 +9,8 @@ import os
 import textwrap
 import chromadb
 from chromadb.utils import embedding_functions
+
+from db import create_readonly_connection, create_sandbox_connection, dict_row_factory
 
 
 # --- Team Colors (basic mapping, extend as needed) ---
@@ -88,16 +91,37 @@ st.set_page_config(
 # --- Load environment variables ---
 load_dotenv()
 
-# --- Database Configuration from environment ---
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def _get_openai_api_key() -> str | None:
+    """Read the OpenAI key from Streamlit secrets first, then the environment.
+
+    st.secrets is how the key is configured on Streamlit Community Cloud;
+    os.getenv (via .env / load_dotenv above) is the local-dev fallback.
+    st.secrets raises if no secrets.toml exists at all (as it won't for
+    local runs), so that has to be caught rather than treated as "no key".
+    """
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    return os.getenv("OPENAI_API_KEY")
+
+
+OPENAI_API_KEY = _get_openai_api_key()
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# --- Demo safety: cap paid LLM calls per browser session ---
+MAX_LLM_CALLS_PER_SESSION = 8
+
+
+def _llm_calls_remaining() -> int:
+    return max(0, MAX_LLM_CALLS_PER_SESSION - st.session_state.get("llm_calls_used", 0))
+
+
+def _record_llm_call():
+    st.session_state["llm_calls_used"] = st.session_state.get("llm_calls_used", 0) + 1
 
 
 class PlayerCRUD:
@@ -125,7 +149,7 @@ class PlayerCRUD:
             query = """
                 INSERT INTO Player
                     (FirstName, LastName, DateOfBirth, Position, Height, Weight, Throws, Bats, PlayerLevel)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             values = (
                 first_name,
@@ -143,7 +167,7 @@ class PlayerCRUD:
             player_id = cursor.lastrowid
             cursor.close()
             return player_id
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error creating player: {e}")
             raise
         except Exception as e:
@@ -153,15 +177,13 @@ class PlayerCRUD:
     def read_player(self, player_id: int):
         """Retrieve a single player by PlayerID, or None if not found."""
         try:
-            if not self.conn.is_connected():
-                st.error("Database connection lost. Please refresh the page.")
-                return None
-            cursor = self.conn.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM Player WHERE PlayerID = %s", (player_id,))
+            cursor = self.conn.cursor()
+            cursor.row_factory = dict_row_factory
+            cursor.execute("SELECT * FROM Player WHERE PlayerID = ?", (player_id,))
             result = cursor.fetchone()
             cursor.close()
             return result
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error reading player: {e}")
             return None
         except Exception as e:
@@ -171,18 +193,16 @@ class PlayerCRUD:
     def read_all_players(self, limit: int = 100, offset: int = 0):
         """Retrieve all players with pagination."""
         try:
-            if not self.conn.is_connected():
-                st.error("Database connection lost. Please refresh the page.")
-                return []
-            cursor = self.conn.cursor(dictionary=True)
+            cursor = self.conn.cursor()
+            cursor.row_factory = dict_row_factory
             cursor.execute(
-                "SELECT * FROM Player ORDER BY LastName, FirstName LIMIT %s OFFSET %s",
+                "SELECT * FROM Player ORDER BY LastName, FirstName LIMIT ? OFFSET ?",
                 (limit, offset),
             )
             results = cursor.fetchall()
             cursor.close()
             return results
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error reading players: {e}")
             return []
         except Exception as e:
@@ -192,15 +212,13 @@ class PlayerCRUD:
     def search_players(self, search_term: str):
         """Search for players by name or PlayerID."""
         try:
-            if not self.conn.is_connected():
-                st.error("Database connection lost. Please refresh the page.")
-                return []
-            cursor = self.conn.cursor(dictionary=True)
+            cursor = self.conn.cursor()
+            cursor.row_factory = dict_row_factory
 
             # Try numeric PlayerID search first
             try:
                 player_id = int(search_term)
-                cursor.execute("SELECT * FROM Player WHERE PlayerID = %s", (player_id,))
+                cursor.execute("SELECT * FROM Player WHERE PlayerID = ?", (player_id,))
                 results = cursor.fetchall()
                 if results:
                     cursor.close()
@@ -213,7 +231,7 @@ class PlayerCRUD:
             cursor.execute(
                 """
                 SELECT * FROM Player
-                WHERE CONCAT(FirstName, ' ', LastName) LIKE %s
+                WHERE (FirstName || ' ' || LastName) LIKE ?
                 ORDER BY LastName, FirstName
                 """,
                 (search_pattern,),
@@ -225,7 +243,7 @@ class PlayerCRUD:
                 cursor.execute(
                     """
                     SELECT * FROM Player
-                    WHERE FirstName LIKE %s OR LastName LIKE %s
+                    WHERE FirstName LIKE ? OR LastName LIKE ?
                     ORDER BY LastName, FirstName
                     """,
                     (search_pattern, search_pattern),
@@ -234,7 +252,7 @@ class PlayerCRUD:
 
             cursor.close()
             return results
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error searching players: {e}")
             return []
         except Exception as e:
@@ -266,7 +284,7 @@ class PlayerCRUD:
 
             for key, value in kwargs.items():
                 if key in field_mapping:
-                    set_clauses.append(f"{field_mapping[key]} = %s")
+                    set_clauses.append(f"{field_mapping[key]} = ?")
                     values.append(value)
                 else:
                     st.warning(f"Unknown field: {key}")
@@ -277,7 +295,7 @@ class PlayerCRUD:
 
             values.append(player_id)
             set_sql = ", ".join(set_clauses)
-            query = f"UPDATE Player SET {set_sql} WHERE PlayerID = %s"
+            query = f"UPDATE Player SET {set_sql} WHERE PlayerID = ?"
             cursor.execute(query, values)
             self.conn.commit()
 
@@ -286,7 +304,7 @@ class PlayerCRUD:
             else:
                 st.warning(f"No player found with ID {player_id}")
                 return False
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error updating player: {e}")
             return False
         except Exception as e:
@@ -300,15 +318,15 @@ class PlayerCRUD:
         """Delete a player record by PlayerID."""
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT PlayerID FROM Player WHERE PlayerID = %s", (player_id,))
+            cursor.execute("SELECT PlayerID FROM Player WHERE PlayerID = ?", (player_id,))
             if not cursor.fetchone():
                 st.error(f"No player found with ID {player_id}")
                 return False
 
-            cursor.execute("DELETE FROM Player WHERE PlayerID = %s", (player_id,))
+            cursor.execute("DELETE FROM Player WHERE PlayerID = ?", (player_id,))
             self.conn.commit()
             return True
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             st.error(f"Database error deleting player: {e}")
             return False
         except Exception as e:
@@ -321,9 +339,6 @@ class PlayerCRUD:
     def get_player_count(self) -> int:
         """Return total number of players in the database."""
         try:
-            if not self.conn.is_connected():
-                st.error("Database connection lost. Please refresh the page.")
-                return 0
             cursor = self.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM Player")
             count = cursor.fetchone()[0]
@@ -335,14 +350,25 @@ class PlayerCRUD:
 
 # --- Helper Functions ---
 @st.cache_resource
-def create_db_connection():
-    """Creates a cached connection to the MySQL database."""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        return conn
-    except mysql.connector.Error as e:
-        st.error(f"Error connecting to database: {e}")
-        return None
+def get_readonly_connection():
+    """Cached, shared read-only connection for SQL Chat and the Analytics Dashboard.
+
+    Shared across all sessions -- safe because it's read-only, so there's no
+    write contention or risk of one visitor's session affecting another's.
+    """
+    return create_readonly_connection()
+
+
+def get_crud_connection():
+    """Per-session writable sandbox connection for Player Management (CRUD).
+
+    Created once per browser session (cached on st.session_state) as a
+    private copy of mlb_scouting.db, so CRUD writes never touch the
+    committed database and each visitor's edits reset on refresh.
+    """
+    if "crud_conn" not in st.session_state:
+        st.session_state["crud_conn"] = create_sandbox_connection()
+    return st.session_state["crud_conn"]
 
 def get_db_schema(conn):
     """
@@ -352,19 +378,19 @@ def get_db_schema(conn):
     cursor = conn.cursor()
 
     # Get list of tables
-    cursor.execute("SHOW TABLES;")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
     tables = [row[0] for row in cursor.fetchall()]
 
     schema_lines = ["Database Schema (tables and columns):"]
 
     # For each table, get its columns
     for table_name in tables:
-        cursor.execute(f"SHOW COLUMNS FROM `{table_name}`;")
+        cursor.execute(f'PRAGMA table_info("{table_name}");')
         columns = cursor.fetchall()
         schema_lines.append(f"Table `{table_name}`:")
         for col in columns:
-            col_name = col[0]
-            col_type = col[1]
+            col_name = col[1]
+            col_type = col[2]
             schema_lines.append(f"  - {col_name} {col_type}")
 
     # Optionally include example rows for key lookup/enum tables so the model
@@ -372,7 +398,7 @@ def get_db_schema(conn):
     important_tables = ["League", "Team", "Player"]
     for table_name in important_tables:
         try:
-            cursor.execute(f"SELECT * FROM `{table_name}` LIMIT 10;")
+            cursor.execute(f'SELECT * FROM "{table_name}" LIMIT 10;')
             rows = cursor.fetchall()
             if rows:
                 col_names = [desc[0] for desc in cursor.description]
@@ -380,7 +406,7 @@ def get_db_schema(conn):
                 for row in rows:
                     row_repr = ", ".join(f"{col}={val}" for col, val in zip(col_names, row))
                     schema_lines.append(f"  - {row_repr}")
-        except mysql.connector.Error:
+        except sqlite3.Error:
             # If the table doesn't exist or another error occurs, just skip it.
             continue
 
@@ -406,15 +432,23 @@ def load_additional_schema_knowledge():
 def generate_sql_from_prompt(prompt, schema):
     """Uses an LLM to generate a SQL query from a natural language prompt."""
 
-    # If no API key / client is configured, fall back timple heuristics.
-    if client.api_key is None:
+    # If no API key / client is configured, fall back to simple heuristics.
+    if client is None:
         st.warning("OPENAI_API_KEY not set. Using placeholder SQL instead of LLM.")
         if "top 5 pitchers by era" in prompt.lower():
-            return "SELECT p.FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
+            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
         elif "highest batting average" in prompt.lower():
-            return "SELECT p.FullName, hs.Season, hs.BattingAverage FROM HitterStats hs JOIN Player p ON hs.PlayerID = p.PlayerID ORDER BY hs.BattingAverage DESC LIMIT 10;"
+            return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, hs.Season, hs.BattingAverage FROM HitterStats hs JOIN Player p ON hs.PlayerID = p.PlayerID ORDER BY hs.BattingAverage DESC LIMIT 10;"
         else:
-            return "SELECT PlayerID, FullName, Position, TeamID FROM Player LIMIT 10;"
+            return "SELECT PlayerID, FirstName, LastName, Position, PlayerLevel FROM Player LIMIT 10;"
+
+    if _llm_calls_remaining() <= 0:
+        st.warning(
+            f"This demo caps LLM-generated queries at {MAX_LLM_CALLS_PER_SESSION} per "
+            "session to keep hosting costs bounded. Showing an example query instead — "
+            "refresh the page to reset your limit."
+        )
+        return "SELECT (p.FirstName || ' ' || p.LastName) AS FullName, ps.Season, ps.EarnedRunAverage FROM PitcherStats ps JOIN Player p ON ps.PlayerID = p.PlayerID ORDER BY ps.EarnedRunAverage ASC LIMIT 5;"
 
     try:
         # Load any hand-written domain notes (e.g., valid LeagueLevel values).
@@ -423,7 +457,7 @@ def generate_sql_from_prompt(prompt, schema):
         # Put schema and any extra notes into the system message so they are
         # pre-loaded context.
         system_content = (
-            "You are a MySQL SQL assistant for an MLB scouting database. "
+            "You are a SQLite SQL assistant for an MLB scouting database. "
             "You are given the exact database schema and a natural language request.\n"
             "- Use ONLY tables and columns that appear in the schema below.\n"
             "- Use the column and table names exactly as written in the schema "
@@ -454,17 +488,48 @@ def generate_sql_from_prompt(prompt, schema):
             max_tokens=200,
             temperature=0.1,
         )
+        _record_llm_call()
         sql_query = response.choices[0].message.content.strip()
         return sql_query
     except Exception as e:
         st.error(f"Error calling SQL LLM: {e}")
         # Fallback if the API call fails
-        return "SELECT PlayerID, FullName, Position, TeamID FROM Player LIMIT 10;"
+        return "SELECT PlayerID, FirstName, LastName, Position, PlayerLevel FROM Player LIMIT 10;"
+
+
+_FORBIDDEN_SQL_KEYWORDS = re.compile(
+    r"(?is)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|"
+    r"ATTACH|DETACH|PRAGMA|VACUUM|REINDEX)\b"
+)
+
+
+def is_safe_select_query(sql: str) -> bool:
+    """True if `sql` is a single, read-only SELECT statement.
+
+    This app runs LLM-generated SQL directly, so on a public demo a
+    non-SELECT statement is a DROP TABLE waiting to happen. The read-only
+    connection (see db.create_readonly_connection) is the real backstop,
+    but rejecting anything that isn't a plain SELECT here means a bad query
+    never even reaches the database.
+    """
+    if not sql:
+        return False
+    stripped = sql.strip().rstrip(";").strip()
+    if not stripped or ";" in stripped:
+        return False  # empty, or multiple stacked statements
+    if not re.match(r"(?is)^SELECT\b", stripped):
+        return False
+    if _FORBIDDEN_SQL_KEYWORDS.search(stripped):
+        return False
+    return True
 
 
 def run_sql_query(conn, sql_query):
     """Executes a SQL query and returns the result as a DataFrame."""
     if not conn or not sql_query:
+        return pd.DataFrame()
+    if not is_safe_select_query(sql_query):
+        st.error("Query rejected: only a single SELECT statement is allowed on this demo.")
         return pd.DataFrame()
     try:
         df = pd.read_sql(sql_query, conn)
@@ -490,11 +555,12 @@ def get_affiliate_map(_conn):
     # We intentionally ignore the specific connection object for caching
     # purposes; this map only depends on the underlying database contents.
     conn = _conn
-    if conn is None or not conn.is_connected():
+    if conn is None:
         return {}
 
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
+        cursor.row_factory = dict_row_factory
         cursor.execute(
             """
             SELECT
@@ -509,7 +575,7 @@ def get_affiliate_map(_conn):
         )
         rows = cursor.fetchall()
         cursor.close()
-    except mysql.connector.Error:
+    except sqlite3.Error:
         return {}
 
     aff_map: dict[str, list[dict]] = {}
@@ -534,10 +600,10 @@ def get_affiliate_map(_conn):
 @st.cache_resource
 def get_chroma_client_and_collections():
     client_chroma = chromadb.PersistentClient(path=".chromadb")
-    ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_name="text-embedding-3-small",
-    )
+    # Local ONNX embedder (chromadb's bundled all-MiniLM-L6-v2) -- retrieval is
+    # free and offline, leaving exactly one paid OpenAI call per question (the
+    # scouting LLM generation itself, not embedding).
+    ef = embedding_functions.DefaultEmbeddingFunction()
     player_col = client_chroma.get_collection(
         name="player_season_profiles",
         embedding_function=ef,
@@ -915,10 +981,41 @@ def format_rag_context_for_llm(player_docs, team_docs):
     return "\n".join(lines)
 
 
+EXAMPLE_SCOUTING_ANSWER = """\
+*(Example answer — not generated from your question)*
+
+I like the idea of leaning on our AAA depth here. Our incumbent MLB shortstop \
+is a league-average bat on an expiring deal, and the AAA option we're looking at \
+just posted a 140 wRC+ over a full season with strong contact rates — that's a \
+real everyday-caliber season, not a small-sample spike.
+
+**Option A – Call him up now.** Benefits: locks in his service-time clock while \
+he's producing, gives our lineup an upgrade immediately. Risks: a jump straight \
+from AAA can come with an adjustment period, and it burns a minor-league option year.
+
+**Option B – One more month of seasoning.** Benefits: lets us evaluate his final \
+stretch against tougher AAA pitching before committing a roster spot. Risks: we \
+delay the upgrade and the incumbent keeps starting.
+
+My honest read: I'd call him up. The offensive profile is strong enough that the \
+adjustment risk is worth it, and our incumbent isn't blocking a long-term piece — \
+this is a low-risk, high-upside move for us.
+"""
+
+
 def call_scouting_llm(user_query, rag_context, guidelines_text):
     """Call OpenAI for the scouting assistant, using RAG + guidelines."""
-    if client.api_key is None:
+    if client is None:
         return "OPENAI_API_KEY is not configured. Unable to call the scouting assistant."
+
+    if _llm_calls_remaining() <= 0:
+        return (
+            f"**Demo limit reached.** This demo caps scouting analyses at "
+            f"{MAX_LLM_CALLS_PER_SESSION} per session to keep hosting costs bounded. "
+            "Refresh the page to reset your limit. In the meantime, here's an example "
+            "of the kind of answer this assistant gives:\n\n"
+            f"{EXAMPLE_SCOUTING_ANSWER}"
+        )
 
     system_prompt = (
         "You are an MLB scouting and roster strategy assistant embedded inside the user's front office.\n"
@@ -975,6 +1072,7 @@ def call_scouting_llm(user_query, rag_context, guidelines_text):
             max_tokens=900,
             temperature=0.2,
         )
+        _record_llm_call()
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Error calling scouting LLM: {e}"
@@ -990,7 +1088,7 @@ app_section = st.sidebar.radio(
 )
 
 # --- Database Connection ---
-conn = create_db_connection()
+conn = get_readonly_connection()
 
 # ==============================================================================
 # --- Section 1: SQL Chat ---
@@ -1091,7 +1189,7 @@ elif app_section == "Analytics Dashboard":
 
         # Dynamically fetch teams filtered by selected levels (if any)
         if selected_levels:
-            placeholders = ",".join(["%s"] * len(selected_levels))
+            placeholders = ",".join(["?"] * len(selected_levels))
             cursor.execute(
                 f"""
                 SELECT t.TeamID, t.TeamName, l.LeagueLevel
@@ -1146,12 +1244,12 @@ elif app_section == "Analytics Dashboard":
         player_params = []
 
         if selected_levels:
-            placeholders = ",".join(["%s"] * len(selected_levels))
+            placeholders = ",".join(["?"] * len(selected_levels))
             player_where.append(f"l.LeagueLevel IN ({placeholders})")
             player_params.extend(selected_levels)
 
         if selected_team_ids:
-            placeholders = ",".join(["%s"] * len(selected_team_ids))
+            placeholders = ",".join(["?"] * len(selected_team_ids))
             player_where.append(f"t.TeamID IN ({placeholders})")
             player_params.extend(selected_team_ids)
 
@@ -1237,18 +1335,18 @@ elif app_section == "Analytics Dashboard":
             }
 
         # --- Build SQL query based on filters ---
-        where_clauses = [f"{stats_alias}.Season = %s"]
+        where_clauses = [f"{stats_alias}.Season = ?"]
         params = [season]
 
         # Level filter (via League.LeagueLevel) - allow multiple
         if selected_levels:
-            placeholders = ",".join(["%s"] * len(selected_levels))
+            placeholders = ",".join(["?"] * len(selected_levels))
             where_clauses.append(f"l.LeagueLevel IN ({placeholders})")
             params.extend(selected_levels)
 
         # Team filter - allow multiple
         if selected_team_ids:
-            placeholders = ",".join(["%s"] * len(selected_team_ids))
+            placeholders = ",".join(["?"] * len(selected_team_ids))
             where_clauses.append(f"{stats_alias}.TeamID IN ({placeholders})")
             params.extend(selected_team_ids)
 
@@ -1258,7 +1356,7 @@ elif app_section == "Analytics Dashboard":
             selected_positions_full = [
                 POSITION_CODE_TO_FULL.get(code, code) for code in selected_position_codes
             ]
-            placeholders = ",".join(["%s"] * len(selected_positions_full))
+            placeholders = ",".join(["?"] * len(selected_positions_full))
             where_clauses.append(f"p.Position IN ({placeholders})")
             params.extend(selected_positions_full)
 
@@ -1270,7 +1368,7 @@ elif app_section == "Analytics Dashboard":
                 label_to_pid[label] = pid
 
             selected_player_ids = [label_to_pid[label] for label in selected_players]
-            placeholders = ",".join(["%s"] * len(selected_player_ids))
+            placeholders = ",".join(["?"] * len(selected_player_ids))
             where_clauses.append(f"{stats_alias}.PlayerID IN ({placeholders})")
             params.extend(selected_player_ids)
 
@@ -1285,7 +1383,7 @@ elif app_section == "Analytics Dashboard":
         sql = f"""
             SELECT 
                 p.PlayerID,
-                CONCAT(p.FirstName, ' ', p.LastName) AS PlayerName,
+                (p.FirstName || ' ' || p.LastName) AS PlayerName,
                 t.TeamName,
                 {stats_alias}.{metric_column} AS MetricValue
             FROM `{stats_table}` {stats_alias}
@@ -1294,7 +1392,7 @@ elif app_section == "Analytics Dashboard":
             JOIN `League` l ON t.LeagueID = l.LeagueID
             WHERE {where_sql}
             ORDER BY MetricValue {order_dir}
-            LIMIT %s;
+            LIMIT ?;
         """
         params.append(top_n)
 
@@ -1371,16 +1469,16 @@ elif app_section == "Analytics Dashboard":
         )
 
         # Build WHERE clauses again (top filters apply here too) for season
-        scatter_where_clauses = [f"{stats_alias}.Season = %s"]
+        scatter_where_clauses = [f"{stats_alias}.Season = ?"]
         scatter_params = [season]
 
         if selected_levels:
-            placeholders = ",".join(["%s"] * len(selected_levels))
+            placeholders = ",".join(["?"] * len(selected_levels))
             scatter_where_clauses.append(f"l.LeagueLevel IN ({placeholders})")
             scatter_params.extend(selected_levels)
 
         if selected_team_ids:
-            placeholders = ",".join(["%s"] * len(selected_team_ids))
+            placeholders = ",".join(["?"] * len(selected_team_ids))
             scatter_where_clauses.append(f"{stats_alias}.TeamID IN ({placeholders})")
             scatter_params.extend(selected_team_ids)
 
@@ -1388,7 +1486,7 @@ elif app_section == "Analytics Dashboard":
             selected_positions_full = [
                 POSITION_CODE_TO_FULL.get(code, code) for code in selected_position_codes
             ]
-            placeholders = ",".join(["%s"] * len(selected_positions_full))
+            placeholders = ",".join(["?"] * len(selected_positions_full))
             scatter_where_clauses.append(f"p.Position IN ({placeholders})")
             scatter_params.extend(selected_positions_full)
 
@@ -1399,7 +1497,7 @@ elif app_section == "Analytics Dashboard":
                 label_to_pid[label] = pid
 
             selected_player_ids = [label_to_pid[label] for label in selected_players]
-            placeholders = ",".join(["%s"] * len(selected_player_ids))
+            placeholders = ",".join(["?"] * len(selected_player_ids))
             scatter_where_clauses.append(f"{stats_alias}.PlayerID IN ({placeholders})")
             scatter_params.extend(selected_player_ids)
 
@@ -1422,7 +1520,7 @@ elif app_section == "Analytics Dashboard":
             JOIN `League` l ON t.LeagueID = l.LeagueID
             WHERE {scatter_where_sql}
             ORDER BY XValue {scatter_order_dir}
-            LIMIT %s;
+            LIMIT ?;
         """
 
         try:
@@ -1434,17 +1532,17 @@ elif app_section == "Analytics Dashboard":
                 top_scatter_player_ids = df_top_scatter["PlayerID"].tolist()
 
                 # Now fetch X and Y values for exactly those players
-                placeholders_players = ",".join(["%s"] * len(top_scatter_player_ids))
-                final_scatter_where = f"{stats_alias}.Season = %s AND {stats_alias}.PlayerID IN ({placeholders_players})"
+                placeholders_players = ",".join(["?"] * len(top_scatter_player_ids))
+                final_scatter_where = f"{stats_alias}.Season = ? AND {stats_alias}.PlayerID IN ({placeholders_players})"
                 final_scatter_params = [season] + top_scatter_player_ids
 
                 if selected_team_ids:
-                    placeholders = ",".join(["%s"] * len(selected_team_ids))
+                    placeholders = ",".join(["?"] * len(selected_team_ids))
                     final_scatter_where += f" AND {stats_alias}.TeamID IN ({placeholders})"
                     final_scatter_params.extend(selected_team_ids)
 
                 if selected_levels:
-                    placeholders = ",".join(["%s"] * len(selected_levels))
+                    placeholders = ",".join(["?"] * len(selected_levels))
                     final_scatter_where += f" AND l.LeagueLevel IN ({placeholders})"
                     final_scatter_params.extend(selected_levels)
 
@@ -1452,14 +1550,14 @@ elif app_section == "Analytics Dashboard":
                     selected_positions_full = [
                         POSITION_CODE_TO_FULL.get(code, code) for code in selected_position_codes
                     ]
-                    placeholders = ",".join(["%s"] * len(selected_positions_full))
+                    placeholders = ",".join(["?"] * len(selected_positions_full))
                     final_scatter_where += f" AND p.Position IN ({placeholders})"
                     final_scatter_params.extend(selected_positions_full)
 
                 final_scatter_sql = f"""
                     SELECT 
                         p.PlayerID,
-                        CONCAT(p.FirstName, ' ', p.LastName) AS PlayerName,
+                        (p.FirstName || ' ' || p.LastName) AS PlayerName,
                         t.TeamName,
                         {stats_alias}.{scatter_x_col} AS XValue,
                         {stats_alias}.{scatter_y_col} AS YValue
@@ -1471,25 +1569,25 @@ elif app_section == "Analytics Dashboard":
                 """
 
                 df_scatter = pd.read_sql(final_scatter_sql, conn, params=final_scatter_params)
-            if df_scatter.empty:
-                st.info("No data found for the selected filters (scatter plot).")
-            else:
-                # Map team names to colors, fallback to default
-                df_scatter["TeamColor"] = df_scatter["TeamName"].map(TEAM_COLORS).fillna(DEFAULT_TEAM_COLOR)
+                if df_scatter.empty:
+                    st.info("No data found for the selected filters (scatter plot).")
+                else:
+                    # Map team names to colors, fallback to default
+                    df_scatter["TeamColor"] = df_scatter["TeamName"].map(TEAM_COLORS).fillna(DEFAULT_TEAM_COLOR)
 
-                scatter_chart = (
-                    alt.Chart(df_scatter)
-                    .mark_circle(size=80, opacity=0.8)
-                    .encode(
-                        x=alt.X("XValue:Q", title=scatter_x_label),
-                        y=alt.Y("YValue:Q", title=scatter_y_label),
-                        color=alt.Color("TeamName:N", legend=alt.Legend(title="Team")),
-                        tooltip=["PlayerName", "TeamName", "XValue", "YValue"],
+                    scatter_chart = (
+                        alt.Chart(df_scatter)
+                        .mark_circle(size=80, opacity=0.8)
+                        .encode(
+                            x=alt.X("XValue:Q", title=scatter_x_label),
+                            y=alt.Y("YValue:Q", title=scatter_y_label),
+                            color=alt.Color("TeamName:N", legend=alt.Legend(title="Team")),
+                            tooltip=["PlayerName", "TeamName", "XValue", "YValue"],
+                        )
+                        .properties(width="container", height=400)
                     )
-                    .properties(width="container", height=400)
-                )
 
-                st.altair_chart(scatter_chart, use_container_width=True)
+                    st.altair_chart(scatter_chart, use_container_width=True)
         except Exception as e:
             st.error(f"Error loading data for scatter plot: {e}")
 
@@ -1514,16 +1612,16 @@ elif app_section == "Analytics Dashboard":
         )
 
         # Build filters used to choose top-N players in 2024
-        top_where_clauses = [f"{stats_alias}.Season = %s"]
+        top_where_clauses = [f"{stats_alias}.Season = ?"]
         top_params = [2024]
 
         if selected_levels:
-            placeholders = ",".join(["%s"] * len(selected_levels))
+            placeholders = ",".join(["?"] * len(selected_levels))
             top_where_clauses.append(f"l.LeagueLevel IN ({placeholders})")
             top_params.extend(selected_levels)
 
         if selected_team_ids:
-            placeholders = ",".join(["%s"] * len(selected_team_ids))
+            placeholders = ",".join(["?"] * len(selected_team_ids))
             top_where_clauses.append(f"{stats_alias}.TeamID IN ({placeholders})")
             top_params.extend(selected_team_ids)
 
@@ -1531,7 +1629,7 @@ elif app_section == "Analytics Dashboard":
             selected_positions_full = [
                 POSITION_CODE_TO_FULL.get(code, code) for code in selected_position_codes
             ]
-            placeholders = ",".join(["%s"] * len(selected_positions_full))
+            placeholders = ",".join(["?"] * len(selected_positions_full))
             top_where_clauses.append(f"p.Position IN ({placeholders})")
             top_params.extend(selected_positions_full)
 
@@ -1542,7 +1640,7 @@ elif app_section == "Analytics Dashboard":
                 label_to_pid[label] = pid
 
             selected_player_ids = [label_to_pid[label] for label in selected_players]
-            placeholders = ",".join(["%s"] * len(selected_player_ids))
+            placeholders = ",".join(["?"] * len(selected_player_ids))
             top_where_clauses.append(f"{stats_alias}.PlayerID IN ({placeholders})")
             top_params.extend(selected_player_ids)
 
@@ -1564,7 +1662,7 @@ elif app_section == "Analytics Dashboard":
             JOIN `League` l ON t.LeagueID = l.LeagueID
             WHERE {top_where_sql}
             ORDER BY MetricValue {line_order_dir}
-            LIMIT %s;
+            LIMIT ?;
         """
 
         try:
@@ -1578,18 +1676,18 @@ elif app_section == "Analytics Dashboard":
 
                 # Now pull their full 2021–2024 history (still respecting filters)
                 history_where_clauses = [
-                    f"{stats_alias}.PlayerID IN ({','.join(['%s'] * len(top_player_ids))})",
-                    f"{stats_alias}.Season BETWEEN %s AND %s",
+                    f"{stats_alias}.PlayerID IN ({','.join(['?'] * len(top_player_ids))})",
+                    f"{stats_alias}.Season BETWEEN ? AND ?",
                 ]
                 history_params = top_player_ids + [2021, 2024]
 
                 if selected_levels:
-                    placeholders = ",".join(["%s"] * len(selected_levels))
+                    placeholders = ",".join(["?"] * len(selected_levels))
                     history_where_clauses.append(f"l.LeagueLevel IN ({placeholders})")
                     history_params.extend(selected_levels)
 
                 if selected_team_ids:
-                    placeholders = ",".join(["%s"] * len(selected_team_ids))
+                    placeholders = ",".join(["?"] * len(selected_team_ids))
                     history_where_clauses.append(f"{stats_alias}.TeamID IN ({placeholders})")
                     history_params.extend(selected_team_ids)
 
@@ -1597,7 +1695,7 @@ elif app_section == "Analytics Dashboard":
                     selected_positions_full = [
                         POSITION_CODE_TO_FULL.get(code, code) for code in selected_position_codes
                     ]
-                    placeholders = ",".join(["%s"] * len(selected_positions_full))
+                    placeholders = ",".join(["?"] * len(selected_positions_full))
                     history_where_clauses.append(f"p.Position IN ({placeholders})")
                     history_params.extend(selected_positions_full)
 
@@ -1606,7 +1704,7 @@ elif app_section == "Analytics Dashboard":
                 line_sql = f"""
                     SELECT
                         p.PlayerID,
-                        CONCAT(p.FirstName, ' ', p.LastName) AS PlayerName,
+                        (p.FirstName || ' ' || p.LastName) AS PlayerName,
                         t.TeamName,
                         {stats_alias}.Season AS Season,
                         {stats_alias}.{line_metric_col} AS MetricValue
@@ -1647,11 +1745,16 @@ elif app_section == "Analytics Dashboard":
 # ============================================================================
 elif app_section == "Player Management (CRUD)":
     st.header("Player Management (CRUD)")
+    st.caption(
+        "You're editing a private, temporary copy of the database. "
+        "Changes here never touch the live demo data and reset if you refresh the page."
+    )
 
-    if not conn:
+    crud_conn = get_crud_connection()
+    if not crud_conn:
         st.error("Database connection failed. Please check the configuration.")
     else:
-        crud = PlayerCRUD(conn)
+        crud = PlayerCRUD(crud_conn)
 
         crud_mode = st.sidebar.radio(
             "Player Management Mode",
