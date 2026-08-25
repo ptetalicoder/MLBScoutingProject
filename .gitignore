@@ -4,6 +4,10 @@
 !.env.example
 .streamlit/secrets.toml
 
+# Local SQLite database (rebuilt by init_sqlite_db.py + data_import_*.py)
+*.db
+*.db-journal
+
 # Virtual environments
 .venv/
 venv/

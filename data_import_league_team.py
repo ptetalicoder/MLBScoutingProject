@@ -1,23 +1,12 @@
 import requests
-import mysql.connector
-import os
-from dotenv import load_dotenv
+import sqlite3
+
+from db import create_db_connection
 
 # --- Configuration ---
 API_BASE_URL = "http://statsapi.mlb.com/api/v1"
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
-SEASON = "2024" 
+SEASON = "2024"
 # Sport IDs for all professional baseball levels
 SPORT_IDS = [1, 11, 12, 13, 14] # MLB, AAA, AA, A+, A
 
@@ -56,28 +45,12 @@ def get_all_teams_from_api(season, sport_ids):
     print(f"Total unique teams fetched: {len(all_teams)}")
     return all_teams
 
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    
-    Returns:
-        mysql.connector.connection: A connection object or None if an error occurs.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
-
 def insert_leagues_into_db(conn, teams):
     """
     Extracts unique leagues from the team data and inserts them into the League table.
     
     Args:
-        conn (mysql.connector.connection): The database connection object.
+        conn (sqlite3.Connection): The database connection object.
         teams (list): A list of team data dictionaries from the API.
     """
     if not teams:
@@ -85,7 +58,7 @@ def insert_leagues_into_db(conn, teams):
         return
 
     cursor = conn.cursor()
-    sql = "INSERT IGNORE INTO League (LeagueID, LeagueName, LeagueLevel) VALUES (%s, %s, %s);"
+    sql = "INSERT OR IGNORE INTO League (LeagueID, LeagueName, LeagueLevel) VALUES (?, ?, ?);"
     
     leagues_to_insert = set()
     for team in teams:
@@ -101,7 +74,7 @@ def insert_leagues_into_db(conn, teams):
         cursor.executemany(sql, list(leagues_to_insert))
         conn.commit()
         print(f"Successfully inserted/updated {cursor.rowcount} leagues.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during league insertion: {e}")
         conn.rollback()
 
@@ -110,7 +83,7 @@ def insert_teams_into_db(conn, teams):
     Inserts team data into the Team table.
     
     Args:
-        conn (mysql.connector.connection): The database connection object.
+        conn (sqlite3.Connection): The database connection object.
         teams (list): A list of team data dictionaries from the API.
     """
     if not teams:
@@ -119,9 +92,9 @@ def insert_teams_into_db(conn, teams):
 
     cursor = conn.cursor()
     sql = """
-    INSERT IGNORE INTO Team (
+    INSERT OR IGNORE INTO Team (
         TeamID, TeamName, City, LeagueID, MLBAffiliateID
-    ) VALUES (%s, %s, %s, %s, %s);
+    ) VALUES (?, ?, ?, ?, ?);
     """
     
     teams_to_insert = []
@@ -139,7 +112,7 @@ def insert_teams_into_db(conn, teams):
         cursor.executemany(sql, teams_to_insert)
         conn.commit()
         print(f"Successfully inserted/updated {cursor.rowcount} teams.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during team insertion: {e}")
         conn.rollback()
 

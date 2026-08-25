@@ -1,62 +1,39 @@
-import mysql.connector
+import sqlite3
 import random
 from datetime import datetime
-import os
-from dotenv import load_dotenv
 
-# --- Configuration ---
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
-
-def create_db_connection():
-    """Creates a connection to the MySQL database."""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-        return conn
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-        return None
+from db import create_db_connection
 
 def get_players(conn):
     """Fetches all players from the Player table."""
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     cursor.execute("SELECT PlayerID, Position FROM Player")
     return cursor.fetchall()
 
 def get_hitter_stats(conn, player_id):
     """Fetches aggregated hitter stats for a player."""
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     query = """
-    SELECT 
-        AVG(BattingAverage) as avg_avg, 
+    SELECT
+        AVG(BattingAverage) as avg_avg,
         AVG(HomeRuns) as avg_hr,
         AVG(StolenBases) as avg_sb
-    FROM HitterStats 
-    WHERE PlayerID = %s AND Season BETWEEN 2021 AND 2024
+    FROM HitterStats
+    WHERE PlayerID = ? AND Season BETWEEN 2021 AND 2024
     """
     cursor.execute(query, (player_id,))
     return cursor.fetchone()
 
 def get_pitcher_stats(conn, player_id):
     """Fetches aggregated pitcher stats for a player."""
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     query = """
-    SELECT 
-        AVG(EarnedRunAverage) as avg_era, 
+    SELECT
+        AVG(EarnedRunAverage) as avg_era,
         AVG(Strikeouts) as avg_so,
         AVG(WalksAllowed) as avg_bb
-    FROM PitcherStats 
-    WHERE PlayerID = %s AND Season BETWEEN 2021 AND 2024
+    FROM PitcherStats
+    WHERE PlayerID = ? AND Season BETWEEN 2021 AND 2024
     """
     cursor.execute(query, (player_id,))
     return cursor.fetchone()
@@ -95,22 +72,27 @@ def generate_pitcher_report(stats):
     return 0, 0, 0, 0, 0, velocity, accuracy, spin_rate, breaking_ball, overall, summary
 
 def insert_scouting_reports(conn, reports):
-    """Inserts scouting reports into the database."""
+    """Inserts scouting reports into the database.
+
+    ScoutingReport has no unique constraint besides its auto-generated
+    ReportID (which isn't part of this insert), so every run always appends
+    fresh rows rather than upserting existing ones — this matches the
+    original MySQL behavior, where the ON DUPLICATE KEY UPDATE clause could
+    never actually trigger for the same reason.
+    """
     cursor = conn.cursor()
     sql = """
     INSERT INTO ScoutingReport (
-        PlayerID, ReportDate, Position, ContactGrade, PowerGrade, RunningGrade, 
-        FieldingGrade, ArmGrade, PitchingVelocity, PitchingAccuracy, 
+        PlayerID, ReportDate, Position, ContactGrade, PowerGrade, RunningGrade,
+        FieldingGrade, ArmGrade, PitchingVelocity, PitchingAccuracy,
         SpinRateGrade, BreakingBallGrade, OverallPotential, Summary
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-        ReportDate = VALUES(ReportDate), Summary = VALUES(Summary);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """
     try:
         cursor.executemany(sql, reports)
         conn.commit()
         print(f"Successfully inserted/updated {cursor.rowcount} scouting reports.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during insertion: {e}")
         conn.rollback()
 
@@ -123,7 +105,7 @@ def main():
 
     players = get_players(conn)
     reports_to_insert = []
-    report_date = datetime.now().date()
+    report_date = datetime.now().date().isoformat()
 
     for i, player in enumerate(players):
         player_id = player['PlayerID']

@@ -1,43 +1,19 @@
 import requests
-import mysql.connector
-import os
+import sqlite3
 import time
-from dotenv import load_dotenv
 from decimal import Decimal
+
+from db import create_db_connection
 
 # --- Configuration ---
 # Kept for potential future API use; not used in current logic.
 API_BASE_URL = "http://statsapi.mlb.com/api/v1"
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 # Seasons to import historical data for
 SEASONS = ["2021", "2022", "2023", "2024"]
 # The league ID for MLB
 MLB_LEAGUE_ID = 103 # American League
 MLB_LEAGUE_ID_2 = 104 # National League
-
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
 
 def get_standings_from_api(season):
     """
@@ -65,7 +41,7 @@ def compute_team_stats(conn, season):
     Returns a dict keyed by TeamID with values containing the metrics needed
     for TeamHistoricalData's new columns.
     """
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
 
     # Hitting aggregates from HitterStats (Season column in schema)
     hitting_sql = """
@@ -81,7 +57,7 @@ def compute_team_stats(conn, season):
             SUM(Walks) AS BB,
             0 AS HBP
         FROM HitterStats
-        WHERE Season = %s
+        WHERE Season = ?
         GROUP BY TeamID
     """
 
@@ -95,7 +71,7 @@ def compute_team_stats(conn, season):
             SUM(Strikeouts) AS SO,
             SUM(WalksAllowed) AS BBAllowed
         FROM PitcherStats
-        WHERE Season = %s
+        WHERE Season = ?
         GROUP BY TeamID
     """
 
@@ -193,32 +169,32 @@ def insert_historical_data_into_db(conn, historical_data):
         TeamHomeRuns, TeamHits, TeamRBI, TeamStolenBases,
         TeamEarnedRunAverage, TeamWHIP, TeamStrikeoutsPitching, TeamWalksAllowed
     ) VALUES (
-        %s, %s, %s, %s, %s, %s,
-        %s, %s, %s,
-        %s, %s, %s, %s,
-        %s, %s, %s, %s,
-        %s, %s, %s, %s
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?
     )
-    ON DUPLICATE KEY UPDATE
-        Wins = VALUES(Wins),
-        Losses = VALUES(Losses),
-        PlayoffAppearance = VALUES(PlayoffAppearance),
-        WorldSeriesWin = VALUES(WorldSeriesWin),
-        RunsScored = VALUES(RunsScored),
-        RunsAllowed = VALUES(RunsAllowed),
-        RunDifferential = VALUES(RunDifferential),
-        TeamBattingAverage = VALUES(TeamBattingAverage),
-        TeamOnBasePercentage = VALUES(TeamOnBasePercentage),
-        TeamSluggingPercentage = VALUES(TeamSluggingPercentage),
-        TeamOnBasePlusSlugging = VALUES(TeamOnBasePlusSlugging),
-        TeamHomeRuns = VALUES(TeamHomeRuns),
-        TeamHits = VALUES(TeamHits),
-        TeamRBI = VALUES(TeamRBI),
-        TeamStolenBases = VALUES(TeamStolenBases),
-        TeamEarnedRunAverage = VALUES(TeamEarnedRunAverage),
-        TeamWHIP = VALUES(TeamWHIP),
-        TeamStrikeoutsPitching = VALUES(TeamStrikeoutsPitching),
-        TeamWalksAllowed = VALUES(TeamWalksAllowed);
+    ON CONFLICT(TeamID, Year) DO UPDATE SET
+        Wins = excluded.Wins,
+        Losses = excluded.Losses,
+        PlayoffAppearance = excluded.PlayoffAppearance,
+        WorldSeriesWin = excluded.WorldSeriesWin,
+        RunsScored = excluded.RunsScored,
+        RunsAllowed = excluded.RunsAllowed,
+        RunDifferential = excluded.RunDifferential,
+        TeamBattingAverage = excluded.TeamBattingAverage,
+        TeamOnBasePercentage = excluded.TeamOnBasePercentage,
+        TeamSluggingPercentage = excluded.TeamSluggingPercentage,
+        TeamOnBasePlusSlugging = excluded.TeamOnBasePlusSlugging,
+        TeamHomeRuns = excluded.TeamHomeRuns,
+        TeamHits = excluded.TeamHits,
+        TeamRBI = excluded.TeamRBI,
+        TeamStolenBases = excluded.TeamStolenBases,
+        TeamEarnedRunAverage = excluded.TeamEarnedRunAverage,
+        TeamWHIP = excluded.TeamWHIP,
+        TeamStrikeoutsPitching = excluded.TeamStrikeoutsPitching,
+        TeamWalksAllowed = excluded.TeamWalksAllowed;
     """
     
     try:
@@ -226,7 +202,7 @@ def insert_historical_data_into_db(conn, historical_data):
         cursor.executemany(sql, historical_data)
         conn.commit()
         print(f"Successfully processed {cursor.rowcount} historical records.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during historical data insertion: {e}")
         conn.rollback()
 
@@ -326,7 +302,7 @@ def update_world_series_winners_manually(conn):
     ]
 
     cursor = conn.cursor()
-    update_sql = "UPDATE TeamHistoricalData SET WorldSeriesWin = 1 WHERE TeamID = %s AND Year = %s"
+    update_sql = "UPDATE TeamHistoricalData SET WorldSeriesWin = 1 WHERE TeamID = ? AND Year = ?"
     updated_count = 0
 
     for team_id, year in winners:
@@ -335,7 +311,7 @@ def update_world_series_winners_manually(conn):
             if cursor.rowcount > 0:
                 print(f"Successfully set TeamID {team_id} as World Series winner for {year}.")
                 updated_count += cursor.rowcount
-        except mysql.connector.Error as e:
+        except sqlite3.Error as e:
             print(f"Database error updating winner for {year} (TeamID {team_id}): {e}")
 
     conn.commit()

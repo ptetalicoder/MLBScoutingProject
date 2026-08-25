@@ -1,24 +1,13 @@
 import requests
-import mysql.connector
-import os
+import sqlite3
 import time
-from dotenv import load_dotenv
+
+from db import create_db_connection
 
 # --- Configuration ---
 # The base URL for the MLB Stats API
 API_BASE_URL = "http://statsapi.mlb.com/api/v1"
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 # The season you want to import players from
 SEASON = "2024"
 # Sport IDs for all professional baseball levels
@@ -103,22 +92,6 @@ def get_player_details(player_id):
         print(f"Error fetching details for playerId {player_id}: {e}")
         return {}
 
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    
-    Returns:
-        mysql.connector.connection: A connection object or None if an error occurs.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
-
 def insert_players_into_db(conn, players):
     """
     Inserts or updates player data into the Player table after enriching it with details.
@@ -130,19 +103,19 @@ def insert_players_into_db(conn, players):
     cursor = conn.cursor()
     sql = """
     INSERT INTO Player (
-        PlayerID, FirstName, LastName, DateOfBirth, Position, 
+        PlayerID, FirstName, LastName, DateOfBirth, Position,
         Height, Weight, Throws, Bats, PlayerLevel
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-        FirstName = VALUES(FirstName),
-        LastName = VALUES(LastName),
-        DateOfBirth = VALUES(DateOfBirth),
-        Position = VALUES(Position),
-        Height = VALUES(Height),
-        Weight = VALUES(Weight),
-        Throws = VALUES(Throws),
-        Bats = VALUES(Bats),
-        PlayerLevel = VALUES(PlayerLevel);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(PlayerID) DO UPDATE SET
+        FirstName = excluded.FirstName,
+        LastName = excluded.LastName,
+        DateOfBirth = excluded.DateOfBirth,
+        Position = excluded.Position,
+        Height = excluded.Height,
+        Weight = excluded.Weight,
+        Throws = excluded.Throws,
+        Bats = excluded.Bats,
+        PlayerLevel = excluded.PlayerLevel;
     """
     
     players_to_insert = []
@@ -181,7 +154,7 @@ def insert_players_into_db(conn, players):
         cursor.executemany(sql, players_to_insert)
         conn.commit()
         print(f"Successfully inserted/updated {cursor.rowcount} players.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during insertion: {e}")
         conn.rollback()
 

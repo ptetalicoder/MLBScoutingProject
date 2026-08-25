@@ -1,20 +1,7 @@
 import random
 import math
-import mysql.connector
-import os
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
+from db import create_db_connection
 
 # Target seasons for fake stats (inclusive range)
 START_SEASON = 2021
@@ -22,15 +9,6 @@ END_SEASON = 2024
 
 # League levels we want to treat as minors
 MINOR_LEVELS = ["Single-A", "Double-A", "Triple-A", "High-A"]
-
-
-def create_db_connection():
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        return conn
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-        return None
 
 
 def get_minor_league_players(conn):
@@ -49,7 +27,7 @@ def get_minor_league_players(conn):
             p.Position,
             p.PlayerLevel
         FROM Player p
-        WHERE p.PlayerLevel IN ({",".join(["%s"] * len(MINOR_LEVELS))})
+        WHERE p.PlayerLevel IN ({",".join(["?"] * len(MINOR_LEVELS))})
     """
 
     params = MINOR_LEVELS
@@ -74,7 +52,7 @@ def get_minor_league_teams_by_level(conn):
         SELECT t.TeamID, l.LeagueLevel
         FROM Team t
         JOIN League l ON t.LeagueID = l.LeagueID
-        WHERE l.LeagueLevel IN ({",".join(["%s"] * len(MINOR_LEVELS))})
+        WHERE l.LeagueLevel IN ({",".join(["?"] * len(MINOR_LEVELS))})
         ORDER BY t.TeamID
     """
     params = MINOR_LEVELS
@@ -285,38 +263,38 @@ def insert_fake_hitter_stats(conn, hitter_rows):
             HardHitPercentage, WinsAboveReplacement,
             WeightedOnBaseAverage, WeightedRunsCreatedPlus
         ) VALUES (
-            %(PlayerID)s, %(TeamID)s, %(Season)s,
-            %(GamesPlayed)s, %(PlateAppearances)s, %(AtBats)s,
-            %(Runs)s, %(Hits)s, %(Doubles)s, %(Triples)s, %(HomeRuns)s, %(RBI)s,
-            %(Walks)s, %(Strikeouts)s, %(StolenBases)s, %(CaughtStealing)s,
-            %(BattingAverage)s, %(OnBasePercentage)s, %(SluggingPercentage)s,
-            %(OnBasePlusSlugging)s, %(IsolatedPower)s,
-            %(HardHitPercentage)s, %(WinsAboveReplacement)s,
-            %(WeightedOnBaseAverage)s, %(WeightedRunsCreatedPlus)s
+            :PlayerID, :TeamID, :Season,
+            :GamesPlayed, :PlateAppearances, :AtBats,
+            :Runs, :Hits, :Doubles, :Triples, :HomeRuns, :RBI,
+            :Walks, :Strikeouts, :StolenBases, :CaughtStealing,
+            :BattingAverage, :OnBasePercentage, :SluggingPercentage,
+            :OnBasePlusSlugging, :IsolatedPower,
+            :HardHitPercentage, :WinsAboveReplacement,
+            :WeightedOnBaseAverage, :WeightedRunsCreatedPlus
         )
-        ON DUPLICATE KEY UPDATE
-            GamesPlayed = VALUES(GamesPlayed),
-            PlateAppearances = VALUES(PlateAppearances),
-            AtBats = VALUES(AtBats),
-            Runs = VALUES(Runs),
-            Hits = VALUES(Hits),
-            Doubles = VALUES(Doubles),
-            Triples = VALUES(Triples),
-            HomeRuns = VALUES(HomeRuns),
-            RBI = VALUES(RBI),
-            Walks = VALUES(Walks),
-            Strikeouts = VALUES(Strikeouts),
-            StolenBases = VALUES(StolenBases),
-            CaughtStealing = VALUES(CaughtStealing),
-            BattingAverage = VALUES(BattingAverage),
-            OnBasePercentage = VALUES(OnBasePercentage),
-            SluggingPercentage = VALUES(SluggingPercentage),
-            OnBasePlusSlugging = VALUES(OnBasePlusSlugging),
-            IsolatedPower = VALUES(IsolatedPower),
-            HardHitPercentage = VALUES(HardHitPercentage),
-            WinsAboveReplacement = VALUES(WinsAboveReplacement),
-            WeightedOnBaseAverage = VALUES(WeightedOnBaseAverage),
-            WeightedRunsCreatedPlus = VALUES(WeightedRunsCreatedPlus);
+        ON CONFLICT(PlayerID, TeamID, Season) DO UPDATE SET
+            GamesPlayed = excluded.GamesPlayed,
+            PlateAppearances = excluded.PlateAppearances,
+            AtBats = excluded.AtBats,
+            Runs = excluded.Runs,
+            Hits = excluded.Hits,
+            Doubles = excluded.Doubles,
+            Triples = excluded.Triples,
+            HomeRuns = excluded.HomeRuns,
+            RBI = excluded.RBI,
+            Walks = excluded.Walks,
+            Strikeouts = excluded.Strikeouts,
+            StolenBases = excluded.StolenBases,
+            CaughtStealing = excluded.CaughtStealing,
+            BattingAverage = excluded.BattingAverage,
+            OnBasePercentage = excluded.OnBasePercentage,
+            SluggingPercentage = excluded.SluggingPercentage,
+            OnBasePlusSlugging = excluded.OnBasePlusSlugging,
+            IsolatedPower = excluded.IsolatedPower,
+            HardHitPercentage = excluded.HardHitPercentage,
+            WinsAboveReplacement = excluded.WinsAboveReplacement,
+            WeightedOnBaseAverage = excluded.WeightedOnBaseAverage,
+            WeightedRunsCreatedPlus = excluded.WeightedRunsCreatedPlus;
     """
 
     cursor.executemany(sql, hitter_rows)
@@ -338,33 +316,33 @@ def insert_fake_pitcher_stats(conn, pitcher_rows):
             EarnedRunAverage, FieldingIndependentPitching, ExpectedERA,
             WalksAndHitsPerInningPitched, WhiffPercentage
         ) VALUES (
-            %(PlayerID)s, %(TeamID)s, %(Season)s,
-            %(Wins)s, %(Losses)s, %(GamesPitched)s, %(GamesStarted)s,
-            %(Saves)s, %(Holds)s,
-            %(InningsPitched)s, %(HitsAllowed)s, %(RunsAllowed)s, %(EarnedRuns)s,
-            %(HomeRunsAllowed)s, %(WalksAllowed)s, %(Strikeouts)s,
-            %(EarnedRunAverage)s, %(FieldingIndependentPitching)s, %(ExpectedERA)s,
-            %(WalksAndHitsPerInningPitched)s, %(WhiffPercentage)s
+            :PlayerID, :TeamID, :Season,
+            :Wins, :Losses, :GamesPitched, :GamesStarted,
+            :Saves, :Holds,
+            :InningsPitched, :HitsAllowed, :RunsAllowed, :EarnedRuns,
+            :HomeRunsAllowed, :WalksAllowed, :Strikeouts,
+            :EarnedRunAverage, :FieldingIndependentPitching, :ExpectedERA,
+            :WalksAndHitsPerInningPitched, :WhiffPercentage
         )
-        ON DUPLICATE KEY UPDATE
-            Wins = VALUES(Wins),
-            Losses = VALUES(Losses),
-            GamesPitched = VALUES(GamesPitched),
-            GamesStarted = VALUES(GamesStarted),
-            Saves = VALUES(Saves),
-            Holds = VALUES(Holds),
-            InningsPitched = VALUES(InningsPitched),
-            HitsAllowed = VALUES(HitsAllowed),
-            RunsAllowed = VALUES(RunsAllowed),
-            EarnedRuns = VALUES(EarnedRuns),
-            HomeRunsAllowed = VALUES(HomeRunsAllowed),
-            WalksAllowed = VALUES(WalksAllowed),
-            Strikeouts = VALUES(Strikeouts),
-            EarnedRunAverage = VALUES(EarnedRunAverage),
-            FieldingIndependentPitching = VALUES(FieldingIndependentPitching),
-            ExpectedERA = VALUES(ExpectedERA),
-            WalksAndHitsPerInningPitched = VALUES(WalksAndHitsPerInningPitched),
-            WhiffPercentage = VALUES(WhiffPercentage);
+        ON CONFLICT(PlayerID, TeamID, Season) DO UPDATE SET
+            Wins = excluded.Wins,
+            Losses = excluded.Losses,
+            GamesPitched = excluded.GamesPitched,
+            GamesStarted = excluded.GamesStarted,
+            Saves = excluded.Saves,
+            Holds = excluded.Holds,
+            InningsPitched = excluded.InningsPitched,
+            HitsAllowed = excluded.HitsAllowed,
+            RunsAllowed = excluded.RunsAllowed,
+            EarnedRuns = excluded.EarnedRuns,
+            HomeRunsAllowed = excluded.HomeRunsAllowed,
+            WalksAllowed = excluded.WalksAllowed,
+            Strikeouts = excluded.Strikeouts,
+            EarnedRunAverage = excluded.EarnedRunAverage,
+            FieldingIndependentPitching = excluded.FieldingIndependentPitching,
+            ExpectedERA = excluded.ExpectedERA,
+            WalksAndHitsPerInningPitched = excluded.WalksAndHitsPerInningPitched,
+            WhiffPercentage = excluded.WhiffPercentage;
     """
 
     cursor.executemany(sql, pitcher_rows)

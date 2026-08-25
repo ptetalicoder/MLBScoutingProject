@@ -1,38 +1,14 @@
 import requests
-import mysql.connector
-import os
+import sqlite3
 import time
-from dotenv import load_dotenv
+
+from db import create_db_connection
 
 # --- Configuration ---
 API_BASE_URL = "http://statsapi.mlb.com/api/v1"
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 SEASONS = ["2021", "2022", "2023", "2024"]
 STAT_GROUP = "hitting"
-
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
 
 def get_all_players_from_db(conn):
     """
@@ -40,13 +16,13 @@ def get_all_players_from_db(conn):
     """
     players = []
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         print("Fetching all players from the database...")
         # Fetching only non-pitchers
         cursor.execute("SELECT PlayerID, Position FROM Player WHERE Position != 'Pitcher';")
         players = cursor.fetchall()
         print(f"Found {len(players)} non-pitcher players in the database.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error while fetching players: {e}")
     return players
 
@@ -82,17 +58,17 @@ def insert_hitter_stats_into_db(conn, all_stats_to_insert):
         Doubles, Triples, HomeRuns, RBI, Walks, Strikeouts, StolenBases, CaughtStealing,
         BattingAverage, OnBasePercentage, SluggingPercentage, OnBasePlusSlugging, IsolatedPower
     ) VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
-    ON DUPLICATE KEY UPDATE
-        GamesPlayed = VALUES(GamesPlayed), PlateAppearances = VALUES(PlateAppearances),
-        AtBats = VALUES(AtBats), Runs = VALUES(Runs), Hits = VALUES(Hits),
-        Doubles = VALUES(Doubles), Triples = VALUES(Triples), HomeRuns = VALUES(HomeRuns),
-        RBI = VALUES(RBI), Walks = VALUES(Walks), Strikeouts = VALUES(Strikeouts),
-        StolenBases = VALUES(StolenBases), CaughtStealing = VALUES(CaughtStealing),
-        BattingAverage = VALUES(BattingAverage), OnBasePercentage = VALUES(OnBasePercentage),
-        SluggingPercentage = VALUES(SluggingPercentage), OnBasePlusSlugging = VALUES(OnBasePlusSlugging),
-        IsolatedPower = VALUES(IsolatedPower);
+    ON CONFLICT(PlayerID, TeamID, Season) DO UPDATE SET
+        GamesPlayed = excluded.GamesPlayed, PlateAppearances = excluded.PlateAppearances,
+        AtBats = excluded.AtBats, Runs = excluded.Runs, Hits = excluded.Hits,
+        Doubles = excluded.Doubles, Triples = excluded.Triples, HomeRuns = excluded.HomeRuns,
+        RBI = excluded.RBI, Walks = excluded.Walks, Strikeouts = excluded.Strikeouts,
+        StolenBases = excluded.StolenBases, CaughtStealing = excluded.CaughtStealing,
+        BattingAverage = excluded.BattingAverage, OnBasePercentage = excluded.OnBasePercentage,
+        SluggingPercentage = excluded.SluggingPercentage, OnBasePlusSlugging = excluded.OnBasePlusSlugging,
+        IsolatedPower = excluded.IsolatedPower;
     """
     
     try:
@@ -100,7 +76,7 @@ def insert_hitter_stats_into_db(conn, all_stats_to_insert):
         cursor.executemany(sql, all_stats_to_insert)
         conn.commit()
         print(f"Successfully processed {cursor.rowcount} hitter stat records.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during hitter stats insertion: {e}")
         conn.rollback()
 
@@ -157,6 +133,26 @@ def main():
                     # This is common for players who didn't play in a given year, so we won't print a message
                     continue
 
+                # Rate stats (avg/obp/slg/ops/iso) must be recomputed from the
+                # aggregated counting stats, not summed across splits — summing
+                # e.g. two teams' BattingAverage double-counts and produces
+                # impossible values (>1.000) for players traded mid-season.
+                at_bats = agg_stats.get('atBats') or 0
+                hits = agg_stats.get('hits') or 0
+                walks = agg_stats.get('baseOnBalls') or 0
+                plate_appearances = agg_stats.get('plateAppearances') or 0
+                doubles = agg_stats.get('doubles') or 0
+                triples = agg_stats.get('triples') or 0
+                home_runs = agg_stats.get('homeRuns') or 0
+                singles = max(hits - doubles - triples - home_runs, 0)
+                total_bases = singles + 2 * doubles + 3 * triples + 4 * home_runs
+
+                avg = round(hits / at_bats, 3) if at_bats else None
+                obp = round((hits + walks) / plate_appearances, 3) if plate_appearances else None
+                slg = round(total_bases / at_bats, 3) if at_bats else None
+                ops = round(obp + slg, 3) if obp is not None and slg is not None else None
+                iso = round(slg - avg, 3) if slg is not None and avg is not None else None
+
                 # Step 3: Prepare the data tuple for insertion
                 # Note: Advanced stats like WAR, wOBA, wRC+ are not available from this endpoint
                 # and will be left as NULL in the database.
@@ -177,11 +173,11 @@ def main():
                     agg_stats.get('strikeOuts'), # Strikeouts
                     agg_stats.get('stolenBases'),
                     agg_stats.get('caughtStealing'),
-                    agg_stats.get('avg'),
-                    agg_stats.get('obp'),
-                    agg_stats.get('slg'),
-                    agg_stats.get('ops'),
-                    agg_stats.get('iso') # Isolated Power
+                    avg,
+                    obp,
+                    slg,
+                    ops,
+                    iso
                 )
                 all_stats_to_insert.append(stat_tuple)
 

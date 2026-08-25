@@ -1,38 +1,14 @@
 import requests
-import mysql.connector
-import os
+import sqlite3
 import time
-from dotenv import load_dotenv
+
+from db import create_db_connection
 
 # --- Configuration ---
 API_BASE_URL = "http://statsapi.mlb.com/api/v1"
 
-# Load environment variables
-load_dotenv()
-
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 SEASONS = ["2021", "2022", "2023", "2024"]
 STAT_GROUP = "pitching"
-
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
 
 def get_all_players_from_db(conn):
     """
@@ -40,13 +16,13 @@ def get_all_players_from_db(conn):
     """
     players = []
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         print("Fetching all pitchers from the database...")
         # Fetching only pitchers
         cursor.execute("SELECT PlayerID, Position FROM Player WHERE Position = 'Pitcher';")
         players = cursor.fetchall()
         print(f"Found {len(players)} pitcher players in the database.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error while fetching players: {e}")
     return players
 
@@ -82,16 +58,16 @@ def insert_pitcher_stats_into_db(conn, all_stats_to_insert):
         InningsPitched, HitsAllowed, RunsAllowed, EarnedRuns, HomeRunsAllowed, WalksAllowed,
         Strikeouts, EarnedRunAverage, WalksAndHitsPerInningPitched
     ) VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
-    ON DUPLICATE KEY UPDATE
-        Wins = VALUES(Wins), Losses = VALUES(Losses), GamesPitched = VALUES(GamesPitched),
-        GamesStarted = VALUES(GamesStarted), Saves = VALUES(Saves), Holds = VALUES(Holds),
-        InningsPitched = VALUES(InningsPitched), HitsAllowed = VALUES(HitsAllowed),
-        RunsAllowed = VALUES(RunsAllowed), EarnedRuns = VALUES(EarnedRuns),
-        HomeRunsAllowed = VALUES(HomeRunsAllowed), WalksAllowed = VALUES(WalksAllowed),
-        Strikeouts = VALUES(Strikeouts), EarnedRunAverage = VALUES(EarnedRunAverage),
-        WalksAndHitsPerInningPitched = VALUES(WalksAndHitsPerInningPitched);
+    ON CONFLICT(PlayerID, TeamID, Season) DO UPDATE SET
+        Wins = excluded.Wins, Losses = excluded.Losses, GamesPitched = excluded.GamesPitched,
+        GamesStarted = excluded.GamesStarted, Saves = excluded.Saves, Holds = excluded.Holds,
+        InningsPitched = excluded.InningsPitched, HitsAllowed = excluded.HitsAllowed,
+        RunsAllowed = excluded.RunsAllowed, EarnedRuns = excluded.EarnedRuns,
+        HomeRunsAllowed = excluded.HomeRunsAllowed, WalksAllowed = excluded.WalksAllowed,
+        Strikeouts = excluded.Strikeouts, EarnedRunAverage = excluded.EarnedRunAverage,
+        WalksAndHitsPerInningPitched = excluded.WalksAndHitsPerInningPitched;
     """
     
     try:
@@ -99,7 +75,7 @@ def insert_pitcher_stats_into_db(conn, all_stats_to_insert):
         cursor.executemany(sql, all_stats_to_insert)
         conn.commit()
         print(f"Successfully processed {cursor.rowcount} pitcher stat records.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during pitcher stats insertion: {e}")
         conn.rollback()
 
@@ -152,21 +128,20 @@ def main():
                     # This is common for players who didn't play in a given year, so we won't print a message
                     continue
 
+                # Rate stats (ERA/WHIP) must be recomputed from the aggregated
+                # counting stats, not summed across splits — summing e.g. two
+                # teams' ERA values produces impossible numbers for pitchers
+                # traded mid-season.
+                innings_pitched = agg_stats.get('inningsPitched') or 0
+                earned_runs = agg_stats.get('earnedRuns') or 0
+                hits_allowed = agg_stats.get('hits') or 0
+                walks_allowed = agg_stats.get('baseOnBalls') or 0
+
+                era = round(9 * earned_runs / innings_pitched, 2) if innings_pitched else None
+                whip = round((hits_allowed + walks_allowed) / innings_pitched, 2) if innings_pitched else None
+
                 # Step 3: Prepare the data tuple for insertion
                 # Note: Advanced stats like FIP, xERA, Whiff% are not available from this endpoint.
-                
-                # Clean up non-numeric stat values from API before insertion
-                era = agg_stats.get('era')
-                try:
-                    era = float(era)
-                except (ValueError, TypeError):
-                    era = None
-
-                whip = agg_stats.get('whip')
-                try:
-                    whip = float(whip)
-                except (ValueError, TypeError):
-                    whip = None
 
                 stat_tuple = (
                     player_id,

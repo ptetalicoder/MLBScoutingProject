@@ -1,47 +1,24 @@
 import pandas as pd
-import mysql.connector
+import sqlite3
 import os
 import re
-from dotenv import load_dotenv
 
-# --- Load environment variables ---
-load_dotenv()
+from db import create_db_connection
 
 # --- Configuration ---
-# Database Connection Details from environment
-DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'user': os.getenv("DB_USER"),
-    'port': int(os.getenv("DB_PORT", "25060")),
-    'password': os.getenv("DB_PASSWORD"),
-    'database': os.getenv("DB_NAME"),
-}
 # The name of the CSV file in the same directory
 CSV_FILE = 'SalaryData2024.csv'
 # The year for the contract data
 CONTRACT_YEAR = 2024
 
-def create_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    """
-    conn = None
-    try:
-        print(f"Connecting to database at: {DB_CONFIG['host']}...")
-        conn = mysql.connector.connect(**DB_CONFIG)
-        print("Database connection successful.")
-    except mysql.connector.Error as e:
-        print(f"Error connecting to database: {e}")
-    return conn
-
 def get_player_map_from_db(conn):
     """
-    Fetches all players from the DB and creates a map of 
+    Fetches all players from the DB and creates a map of
     'lowercase fullname' -> PlayerID for efficient lookup.
     """
     player_map = {}
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         print("Fetching all players from database to create a name map...")
         cursor.execute("SELECT PlayerID, FirstName, LastName FROM Player;")
         players = cursor.fetchall()
@@ -50,18 +27,18 @@ def get_player_map_from_db(conn):
             full_name = f"{player['FirstName']} {player['LastName']}".lower()
             player_map[full_name] = player['PlayerID']
         print(f"Created a map for {len(players)} players.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error while fetching players: {e}")
     return player_map
 
 def get_team_map_from_db(conn):
     """
-    Fetches all teams from the DB and creates a map of 
+    Fetches all teams from the DB and creates a map of
     'lowercase teamname' -> TeamID for efficient lookup.
     """
     team_map = {}
     try:
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         print("Fetching all teams from database to create a name map...")
         cursor.execute("SELECT TeamID, TeamName FROM Team;")
         teams = cursor.fetchall()
@@ -70,7 +47,7 @@ def get_team_map_from_db(conn):
             team_name = team['TeamName'].lower()
             team_map[team_name] = team['TeamID']
         print(f"Created a map for {len(teams)} teams.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error while fetching teams: {e}")
     return team_map
 
@@ -131,11 +108,11 @@ def insert_contracts_into_db(conn, contracts_to_insert):
     sql = """
     INSERT INTO Contract (
         PlayerID, TeamID, Year, Salary, SigningBonus, Experience
-    ) VALUES (%s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-        Salary = VALUES(Salary),
-        SigningBonus = VALUES(SigningBonus),
-        Experience = VALUES(Experience);
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(PlayerID, TeamID, Year) DO UPDATE SET
+        Salary = excluded.Salary,
+        SigningBonus = excluded.SigningBonus,
+        Experience = excluded.Experience;
     """
     
     try:
@@ -143,7 +120,7 @@ def insert_contracts_into_db(conn, contracts_to_insert):
         cursor.executemany(sql, contracts_to_insert)
         conn.commit()
         print(f"Successfully processed {cursor.rowcount} contract records.")
-    except mysql.connector.Error as e:
+    except sqlite3.Error as e:
         print(f"Database error during contract insertion: {e}")
         conn.rollback()
 
