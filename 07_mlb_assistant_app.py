@@ -60,6 +60,22 @@ TEAM_COLORS = {
 DEFAULT_TEAM_COLOR = "#888888"
 
 
+def team_color_scale(team_names) -> alt.Scale:
+    """Build an Altair color scale covering exactly the given team names.
+
+    The DB has ~150 teams (30 MLB clubs + their minor-league affiliates) but
+    TEAM_COLORS only has real colors for the 30 MLB clubs. A scale with a
+    fixed domain of just those 30 would leave any affiliate name outside its
+    domain unmapped (invisible/undefined color) whenever a chart's data
+    includes minor-league teams, so the domain/range here are built from
+    whatever team names are actually present, falling back to
+    DEFAULT_TEAM_COLOR for anything not in TEAM_COLORS.
+    """
+    domain = sorted(set(team_names))
+    color_range = [TEAM_COLORS.get(name, DEFAULT_TEAM_COLOR) for name in domain]
+    return alt.Scale(domain=domain, range=color_range)
+
+
 # --- Position code to full-name mapping (adjust to match your data) ---
 POSITION_CODE_TO_FULL = {
     # Hitters
@@ -78,6 +94,15 @@ POSITION_CODE_TO_FULL = {
     "SP": "Starting Pitcher",
     "RP": "Relief Pitcher",
     "CP": "Closer",
+}
+
+
+# --- Column display config for the CRUD Player table (View/Search tabs) ---
+CRUD_PLAYER_COLUMN_CONFIG = {
+    "PlayerID": st.column_config.NumberColumn("ID", format="%d", width="small"),
+    "DateOfBirth": st.column_config.DateColumn("DOB", format="YYYY-MM-DD"),
+    "Height": st.column_config.NumberColumn("Height (in)"),
+    "Weight": st.column_config.NumberColumn("Weight (lbs)"),
 }
 
 
@@ -107,12 +132,77 @@ def qualifying_where_clause(metric_columns, stats_alias, player_type):
     return f"{stats_alias}.InningsPitched >= {MIN_INNINGS_PITCHED_FOR_RATE_STATS}"
 
 
+# --- Custom CSS (theme colors themselves come from .streamlit/config.toml) ---
+_CUSTOM_CSS = """
+<style>
+.app-hero {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid #26314A;
+}
+.app-hero__badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #3B82F6, #1E3A8A);
+    font-size: 26px;
+    flex-shrink: 0;
+}
+.app-hero__text { display: flex; flex-direction: column; }
+.app-hero__title {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: #E5E9F0;
+    margin: 0;
+    line-height: 1.2;
+}
+.app-hero__subtitle {
+    font-size: 0.95rem;
+    color: #94A3B8;
+    margin: 2px 0 0 0;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadioOption"] {
+    padding: 10px 14px;
+    border-radius: 8px;
+    transition: background-color .15s ease;
+}
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:hover {
+    background-color: #1B2438;
+}
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked) {
+    background-color: #1E2A44;
+    border-left: 3px solid #3B82F6;
+}
+
+[data-testid="stMarkdownContainer"] hr {
+    border-color: #26314A;
+    margin: 1.5rem 0;
+}
+
+[data-testid="stButton"] button {
+    font-weight: 600;
+    transition: filter .15s ease;
+}
+[data-testid="stButton"] button:hover {
+    filter: brightness(1.1);
+}
+</style>
+"""
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="MLB Scouting & Roster Assistant",
     page_icon="⚾",
     layout="wide"
 )
+st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
 # --- Load environment variables ---
 load_dotenv()
@@ -1110,13 +1200,31 @@ def call_scouting_llm(user_query, rag_context, guidelines_text):
         return f"Error calling scouting LLM: {e}"
 
 # --- Main Application ---
-st.title("⚾ MLB Scouting & Roster Assistant")
+st.markdown(
+    """
+    <div class="app-hero">
+        <div class="app-hero__badge">⚾</div>
+        <div class="app-hero__text">
+            <p class="app-hero__title">MLB Scouting & Roster Assistant</p>
+            <p class="app-hero__subtitle">Front-office grade scouting analytics — SQL, dashboards, and AI-assisted roster decisions</p>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # --- Sidebar Navigation ---
+NAV_ICONS = {
+    "SQL Chat": "🔍",
+    "Analytics Dashboard": "📊",
+    "Player Management (CRUD)": "🧑‍💼",
+    "Scouting Assistant (LLM)": "🤖",
+}
 st.sidebar.title("Navigation")
 app_section = st.sidebar.radio(
     "Go to",
-    ("SQL Chat", "Analytics Dashboard", "Player Management (CRUD)", "Scouting Assistant (LLM)")
+    list(NAV_ICONS.keys()),
+    format_func=lambda name: f"{NAV_ICONS[name]} {name}",
 )
 
 # --- Database Connection ---
@@ -1137,20 +1245,20 @@ if app_section == "SQL Chat":
     if conn:
         col1, col2 = st.columns([2, 3])
 
-        with col1:
+        with col1, st.container(border=True):
             # User input
             user_prompt = st.text_area("Enter your question here:", height=150)
-            
+
             if st.button("Generate and Run Query"):
                 if user_prompt:
                     with st.spinner("Generating SQL..."):
                         # In a real app, you'd get the schema to help the LLM
-                        # schema = get_db_schema(conn) 
+                        # schema = get_db_schema(conn)
                         schema = get_db_schema(conn) # Using a placeholder for now
-                        
+
                         generated_sql = generate_sql_from_prompt(user_prompt, schema)
                         st.session_state['generated_sql'] = generated_sql
-                        
+
                         # Run the query
                         query_results = run_sql_query(conn, generated_sql)
                         st.session_state['query_results'] = query_results
@@ -1158,18 +1266,29 @@ if app_section == "SQL Chat":
                     st.warning("Please enter a question.")
 
             # Display generated SQL
-            st.markdown("---")
+            st.divider()
             st.subheader("Generated SQL")
             if 'generated_sql' in st.session_state:
                 st.code(st.session_state['generated_sql'], language="sql")
             else:
                 st.info("SQL will appear here after you run a query.")
 
-        with col2:
+        with col2, st.container(border=True):
             # Display query results
             st.subheader("Query Results")
             if 'query_results' in st.session_state:
-                st.dataframe(st.session_state['query_results'])
+                results_df = st.session_state['query_results']
+                st.caption(f"{len(results_df)} row(s) returned")
+                float_cols = results_df.select_dtypes(include="float").columns
+                column_config = {
+                    col: st.column_config.NumberColumn(format="%.3f") for col in float_cols
+                }
+                st.dataframe(
+                    results_df,
+                    column_config=column_config,
+                    hide_index=True,
+                    width="stretch",
+                )
             else:
                 st.info("Results from the database will appear here.")
     else:
@@ -1188,7 +1307,7 @@ elif app_section == "Analytics Dashboard":
         # --- High-level controls ---
         st.subheader("Filters")
 
-        col_filters_1, col_filters_2 = st.columns(2)
+        col_filters_1, col_filters_2 = st.container(border=True).columns(2)
 
         with col_filters_1:
             player_type = st.radio(
@@ -1265,7 +1384,8 @@ elif app_section == "Analytics Dashboard":
             # All pitchers are stored as generic "Pitcher" in Player.Position
             position_options = ["P"]
 
-        selected_position_codes = st.multiselect(
+        more_filters_card = st.container(border=True)
+        selected_position_codes = more_filters_card.multiselect(
             "Position filter (optional)",
             options=position_options,
         )
@@ -1307,13 +1427,13 @@ elif app_section == "Analytics Dashboard":
             f"{fn} {ln} - {tname if tname else 'Unknown Team'} - {pos if pos else 'N/A'}"
             for (pid, fn, ln, tname, pos) in player_rows
         ]
-        selected_players = st.multiselect(
+        selected_players = more_filters_card.multiselect(
             "Specific players (optional)",
             options=player_display,
         )
 
         # --- Metric selection for bar chart ---
-        st.markdown("---")
+        st.divider()
         st.subheader("Bar Chart – Top Players by Metric")
 
         if player_type == "Hitter":
@@ -1441,18 +1561,37 @@ elif app_section == "Analytics Dashboard":
                 # Sort explicitly according to metric
                 df_sorted = df.sort_values("MetricValue", ascending=(order_dir == "ASC"))
 
-                # Map team names to colors, fallback to default
-                df_sorted["TeamColor"] = df_sorted["TeamName"].map(TEAM_COLORS).fillna(DEFAULT_TEAM_COLOR)
+                value_format = ".3f" if metric_column in RATE_STAT_COLUMNS else ".0f"
 
-                # Build Altair chart with labels and team colors
+                # KPI summary row, computed from the same data as the chart below
+                kpi_card = st.container(border=True)
+                kpi_col1, kpi_col2, kpi_col3 = kpi_card.columns(3)
+                top_row = df_sorted.iloc[0]
+                kpi_col1.metric("Players shown", len(df_sorted))
+                kpi_col2.metric(
+                    f"Top {metric_label}",
+                    f"{top_row['MetricValue']:{value_format}}",
+                    help=f"{top_row['PlayerName']} ({top_row['TeamName']})",
+                )
+                kpi_col3.metric(
+                    f"Avg {metric_label}",
+                    f"{df_sorted['MetricValue'].mean():{value_format}}",
+                )
+
+                # Build Altair chart with labels and real MLB team colors
                 base = alt.Chart(df_sorted).encode(
                     x=alt.X("PlayerName:N", sort=list(df_sorted["PlayerName"]), title="Player"),
                     y=alt.Y("MetricValue:Q", title=metric_label),
                     color=alt.Color(
                         "TeamName:N",
+                        scale=team_color_scale(df_sorted["TeamName"]),
                         legend=alt.Legend(title="Team"),
                     ),
-                    tooltip=["PlayerName", "TeamName", "MetricValue"],
+                    tooltip=[
+                        alt.Tooltip("PlayerName:N", title="Player"),
+                        alt.Tooltip("TeamName:N", title="Team"),
+                        alt.Tooltip("MetricValue:Q", title=metric_label, format=value_format),
+                    ],
                 )
 
                 bars = base.mark_bar()
@@ -1462,7 +1601,7 @@ elif app_section == "Analytics Dashboard":
                     baseline="bottom",
                     dy=-4,
                 ).encode(
-                    text=alt.Text("MetricValue:Q", format=".2f"),
+                    text=alt.Text("MetricValue:Q", format=value_format),
                 )
 
                 chart = (bars + labels).properties(
@@ -1470,12 +1609,13 @@ elif app_section == "Analytics Dashboard":
                     height=400,
                 )
 
-                st.altair_chart(chart, use_container_width=True)
+                with st.container(border=True):
+                    st.altair_chart(chart, width="stretch")
         except Exception as e:
             st.error(f"Error loading data for bar chart: {e}")
 
         # --- Scatter Plot – Compare Two Metrics ---
-        st.markdown("---")
+        st.divider()
         st.subheader("Scatter Plot – Metric vs Metric")
 
         col_scatter_x, col_scatter_y = st.columns(2)
@@ -1612,27 +1752,33 @@ elif app_section == "Analytics Dashboard":
                 if df_scatter.empty:
                     st.info("No data found for the selected filters (scatter plot).")
                 else:
-                    # Map team names to colors, fallback to default
-                    df_scatter["TeamColor"] = df_scatter["TeamName"].map(TEAM_COLORS).fillna(DEFAULT_TEAM_COLOR)
+                    x_format = ".3f" if scatter_x_col in RATE_STAT_COLUMNS else ".0f"
+                    y_format = ".3f" if scatter_y_col in RATE_STAT_COLUMNS else ".0f"
 
                     scatter_chart = (
                         alt.Chart(df_scatter)
                         .mark_circle(size=80, opacity=0.8)
                         .encode(
-                            x=alt.X("XValue:Q", title=scatter_x_label),
-                            y=alt.Y("YValue:Q", title=scatter_y_label),
-                            color=alt.Color("TeamName:N", legend=alt.Legend(title="Team")),
-                            tooltip=["PlayerName", "TeamName", "XValue", "YValue"],
+                            x=alt.X("XValue:Q", title=scatter_x_label, axis=alt.Axis(format=x_format)),
+                            y=alt.Y("YValue:Q", title=scatter_y_label, axis=alt.Axis(format=y_format)),
+                            color=alt.Color("TeamName:N", scale=team_color_scale(df_scatter["TeamName"]), legend=alt.Legend(title="Team")),
+                            tooltip=[
+                                alt.Tooltip("PlayerName:N", title="Player"),
+                                alt.Tooltip("TeamName:N", title="Team"),
+                                alt.Tooltip("XValue:Q", title=scatter_x_label, format=x_format),
+                                alt.Tooltip("YValue:Q", title=scatter_y_label, format=y_format),
+                            ],
                         )
                         .properties(width="container", height=400)
                     )
 
-                    st.altair_chart(scatter_chart, use_container_width=True)
+                    with st.container(border=True):
+                        st.altair_chart(scatter_chart, width="stretch")
         except Exception as e:
             st.error(f"Error loading data for scatter plot: {e}")
 
         # --- Line Chart – Metric over Seasons (2021–2024) ---
-        st.markdown("---")
+        st.divider()
         st.subheader("Line Chart – Metric over Seasons (2021–2024)")
 
         line_metric_options = scatter_metric_options
@@ -1765,21 +1911,29 @@ elif app_section == "Analytics Dashboard":
                 if df_line.empty:
                     st.info("No data found for the selected filters (line chart).")
                 else:
-                    df_line["TeamColor"] = df_line["TeamName"].map(TEAM_COLORS).fillna(DEFAULT_TEAM_COLOR)
+                    line_value_format = ".3f" if line_metric_col in RATE_STAT_COLUMNS else ".0f"
 
+                    # Colored by player (not team) so two players on the same
+                    # club still render as visually distinct trend lines.
                     line_chart = (
                         alt.Chart(df_line)
                         .mark_line(point=True)
                         .encode(
-                            x=alt.X("Season:Q", title="Season"),
-                            y=alt.Y("MetricValue:Q", title=line_metric_label),
+                            x=alt.X("Season:Q", title="Season", axis=alt.Axis(format="d")),
+                            y=alt.Y("MetricValue:Q", title=line_metric_label, axis=alt.Axis(format=line_value_format)),
                             color=alt.Color("PlayerName:N", legend=alt.Legend(title="Player")),
-                            tooltip=["PlayerName", "TeamName", "Season", "MetricValue"],
+                            tooltip=[
+                                alt.Tooltip("PlayerName:N", title="Player"),
+                                alt.Tooltip("TeamName:N", title="Team"),
+                                alt.Tooltip("Season:Q", title="Season"),
+                                alt.Tooltip("MetricValue:Q", title=line_metric_label, format=line_value_format),
+                            ],
                         )
                         .properties(width="container", height=400)
                     )
 
-                    st.altair_chart(line_chart, use_container_width=True)
+                    with st.container(border=True):
+                        st.altair_chart(line_chart, width="stretch")
         except Exception as e:
             st.error(f"Error loading data for line chart: {e}")
 
@@ -1789,7 +1943,7 @@ elif app_section == "Analytics Dashboard":
 # ============================================================================
 elif app_section == "Player Management (CRUD)":
     st.header("Player Management (CRUD)")
-    st.caption(
+    st.info(
         "You're editing a private, temporary copy of the database. "
         "Changes here never touch the live demo data and reset if you refresh the page."
     )
@@ -1800,13 +1954,10 @@ elif app_section == "Player Management (CRUD)":
     else:
         crud = PlayerCRUD(crud_conn)
 
-        crud_mode = st.sidebar.radio(
-            "Player Management Mode",
-            ("Create", "View", "Search", "Update", "Delete"),
-        )
+        crud_tabs = st.tabs(["Create", "View", "Search", "Update", "Delete"])
 
         # --- Create ---
-        if crud_mode == "Create":
+        with crud_tabs[0]:
             st.subheader("Create New Player")
             col1, col2 = st.columns(2)
 
@@ -1841,10 +1992,9 @@ elif app_section == "Player Management (CRUD)":
                     st.success(f"Player created with PlayerID = {pid}")
 
         # --- View ---
-        elif crud_mode == "View":
+        with crud_tabs[1]:
             st.subheader("View Players")
             total = crud.get_player_count()
-            st.write(f"Total players in database: {total}")
 
             page_size = st.selectbox("Page size", options=[10, 25, 50, 100], index=1)
             page = st.number_input("Page", min_value=1, value=1)
@@ -1852,23 +2002,37 @@ elif app_section == "Player Management (CRUD)":
 
             players = crud.read_all_players(limit=page_size, offset=offset)
             if players:
-                st.dataframe(pd.DataFrame(players))
+                showing_end = min(offset + page_size, total)
+                st.caption(f"Showing {offset + 1}-{showing_end} of {total} player(s)")
+                st.dataframe(
+                    pd.DataFrame(players),
+                    column_config=CRUD_PLAYER_COLUMN_CONFIG,
+                    hide_index=True,
+                    width="stretch",
+                )
             else:
+                st.caption(f"{total} player(s) in database — none on this page")
                 st.info("No players found for this page.")
 
         # --- Search ---
-        elif crud_mode == "Search":
+        with crud_tabs[2]:
             st.subheader("Search Players")
             term = st.text_input("Search by name or PlayerID")
             if st.button("Search") and term:
                 results = crud.search_players(term)
                 if results:
-                    st.dataframe(pd.DataFrame(results))
+                    st.caption(f"{len(results)} player(s) matched")
+                    st.dataframe(
+                        pd.DataFrame(results),
+                        column_config=CRUD_PLAYER_COLUMN_CONFIG,
+                        hide_index=True,
+                        width="stretch",
+                    )
                 else:
                     st.info("No players matched your search.")
 
         # --- Update ---
-        elif crud_mode == "Update":
+        with crud_tabs[3]:
             st.subheader("Update Player")
             search_id = st.number_input("PlayerID to update", min_value=1, step=1)
             if st.button("Load Player"):
@@ -1927,7 +2091,7 @@ elif app_section == "Player Management (CRUD)":
                             st.error("Update failed.")
 
         # --- Delete ---
-        elif crud_mode == "Delete":
+        with crud_tabs[4]:
             st.subheader("Delete Player")
             del_id = st.number_input("PlayerID to delete", min_value=1, step=1)
             confirm = st.checkbox("I understand this will permanently delete the player.")
@@ -1991,11 +2155,14 @@ elif app_section == "Scouting Assistant (LLM)":
 
     col_left, col_right = st.columns([2, 3])
 
-    with col_left:
+    with col_left, st.container(border=True):
         n_players = st.slider("Max player documents to retrieve", 5, 100, 25, 5)
         n_teams = st.slider("Max team documents to retrieve", 2, 50, 10, 2)
 
-        if st.button("Run Scouting Analysis"):
+        remaining = _llm_calls_remaining()
+        st.caption(f"{remaining} of {MAX_LLM_CALLS_PER_SESSION} analyses remaining this session")
+
+        if st.button("Run Scouting Analysis", disabled=remaining <= 0):
             if not user_query.strip():
                 st.warning("Please enter a scenario or question.")
             else:
@@ -2020,17 +2187,24 @@ elif app_section == "Scouting Assistant (LLM)":
                     )
                     rag_context = format_rag_context_for_llm(player_docs, team_docs)
                     st.session_state["rag_context"] = rag_context
+                    st.session_state["rag_doc_counts"] = (len(player_docs), len(team_docs))
                     answer = call_scouting_llm(effective_query, rag_context, guidelines_text)
                     st.session_state["scouting_answer"] = answer
 
-    with col_right:
+    with col_right, st.container(border=True):
         st.subheader("Assistant Answer")
         if "scouting_answer" in st.session_state:
             st.markdown(st.session_state["scouting_answer"])
+            if "rag_doc_counts" in st.session_state:
+                n_player_docs, n_team_docs = st.session_state["rag_doc_counts"]
+                st.caption(
+                    f"Retrieved {n_player_docs} player record(s) and {n_team_docs} "
+                    "team record(s) as context for this answer"
+                )
         else:
             st.info("The assistant's answer will appear here after you run an analysis.")
 
-    st.markdown("---")
+    st.divider()
     st.subheader("Retrieved Context (for transparency)")
     if "rag_context" in st.session_state:
         with st.expander("Show retrieved RAG context"):
